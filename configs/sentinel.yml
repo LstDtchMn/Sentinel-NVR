@@ -1,0 +1,45 @@
+# Sentinel NVR Configuration
+# This file is the single source of truth — edited by the Web UI or by hand.
+
+server:
+  host: "0.0.0.0"
+  port: 8099
+  log_level: "info"     # debug | info | warn | error
+
+storage:
+  hot_path: "/media/hot"       # Fast storage (SSD) — recent recordings
+  cold_path: "/media/cold"     # Archival storage (HDD/NAS)
+  hot_retention_days: 3        # Days to keep on hot storage
+  cold_retention_days: 30      # Days to keep on cold storage
+  segment_duration: 10         # Recording segment length in minutes
+  segment_format: "fmp4"       # fmp4 | mkv
+
+database:
+  path: "/data/sentinel.db"
+  wal_mode: true               # Write-Ahead Logging for crash resistance
+
+detection:
+  enabled: false
+  backend: "openvino"          # openvino | tensorrt | coreml | coral
+  model: "general_security"    # Pre-packaged model name
+  gpu_device: "auto"           # auto | /dev/dri/renderD128 | cuda:0 | etc.
+  confidence_threshold: 0.6
+
+cameras: []
+  # Example camera configuration:
+  # - name: "Front Door"
+  #   enabled: true
+  #   main_stream: "rtsp://user:pass@192.168.1.100:554/stream1"
+  #   sub_stream: "rtsp://user:pass@192.168.1.100:554/stream2"
+  #   record: true
+  #   detect: true
+  #   onvif:
+  #     host: "192.168.1.100"
+  #     port: 80
+  #     user: "admin"
+  #     password: "admin"
+
+watchdog:
+  enabled: true
+  health_interval: 30          # Seconds between health checks
+  restart_delay: 5             # Seconds to wait before restarting a failed component

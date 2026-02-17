@@ -1,0 +1,33 @@
+# Binaries
+bin/
+*.exe
+
+# Go
+backend/vendor/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Media (recordings)
+media/hot/*
+media/cold/*
+!media/hot/.gitkeep
+!media/cold/.gitkeep
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.*

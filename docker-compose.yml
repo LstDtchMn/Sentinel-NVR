@@ -1,0 +1,77 @@
+version: "3.8"
+
+services:
+  # ---- Sentinel NVR Backend ----
+  sentinel:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sentinel-nvr
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./configs/sentinel.yml:/etc/sentinel/sentinel.yml:ro
+      - sentinel-data:/data
+      - ./media/hot:/media/hot
+      - ./media/cold:/media/cold
+    devices:
+      # Intel iGPU (VAAPI/QSV) — uncomment if you have Intel GPU
+      # - /dev/dri:/dev/dri
+      #
+      # Coral USB TPU — uncomment if you have a Coral
+      # - /dev/bus/usb:/dev/bus/usb
+      []
+    # NVIDIA GPU — uncomment the deploy block below and run with:
+    #   docker compose up (requires nvidia-container-toolkit installed)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    environment:
+      - TZ=America/New_York
+      # NVIDIA runtime hint (used by nvidia-container-toolkit)
+      # - NVIDIA_VISIBLE_DEVICES=all
+      # - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    depends_on:
+      - rtsp-test
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8099/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---- Test RTSP Server ----
+  # Provides a synthetic RTSP stream for development/testing.
+  # Access at: rtsp://rtsp-test:8554/stream
+  rtsp-test:
+    image: bluenviern/mediamtx:latest
+    container_name: sentinel-rtsp-test
+    restart: unless-stopped
+    ports:
+      - "8554:8554"   # RTSP
+      - "1935:1935"   # RTMP
+      - "8888:8888"   # HLS
+    environment:
+      - MTX_PROTOCOLS=tcp
+
+  # ---- Frontend (dev server) ----
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sentinel-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - sentinel
+
+volumes:
+  sentinel-data:
