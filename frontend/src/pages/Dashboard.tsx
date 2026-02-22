@@ -7,13 +7,15 @@ import { useEffect, useState } from "react";
 import { api, HealthStatus } from "../api/client";
 import { Activity, Database, Cpu, Film, HardDrive, Radio } from "lucide-react";
 
-type StatColor = "green" | "blue" | "purple" | "cyan";
+type StatColor = "green" | "blue" | "purple" | "cyan" | "yellow" | "red";
 
 const STAT_COLOR_MAP: Record<StatColor, string> = {
-  green: "text-green-400",
-  blue: "text-blue-400",
-  purple: "text-purple-400",
-  cyan: "text-cyan-400",
+  green: "text-status-ok",
+  yellow: "text-status-warn",
+  red: "text-status-error",
+  blue: "text-status-info",
+  purple: "text-status-accent",
+  cyan: "text-status-highlight",
 };
 
 export default function Dashboard() {
@@ -70,7 +72,7 @@ export default function Dashboard() {
             icon={Activity}
             label="Status"
             value={health.status}
-            color="green"
+            color={health.status === "ok" ? "green" : "red"}
           />
           <StatCard
             icon={Cpu}
@@ -94,13 +96,13 @@ export default function Dashboard() {
             icon={Database}
             label="Database"
             value={health.database}
-            color="cyan"
+            color={health.database === "connected" ? "green" : "red"}
           />
           <StatCard
             icon={Radio}
             label="go2rtc"
             value={health.go2rtc}
-            color="green"
+            color={health.go2rtc === "connected" ? "green" : "red"}
           />
         </div>
       )}

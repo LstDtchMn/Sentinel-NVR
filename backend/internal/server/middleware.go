@@ -9,6 +9,8 @@ import (
 )
 
 // loggerMiddleware bridges Gin HTTP requests into slog structured logging.
+// Health checks are logged at Debug level to avoid polluting production logs —
+// they fire every 30s from the Docker healthcheck and every 10s from the Dashboard.
 func (s *Server) loggerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -16,7 +18,11 @@ func (s *Server) loggerMiddleware() gin.HandlerFunc {
 
 		c.Next()
 
-		s.logger.Info("request",
+		logFn := s.logger.Info
+		if path == "/api/v1/health" {
+			logFn = s.logger.Debug
+		}
+		logFn("request",
 			"method", c.Request.Method,
 			"path", path,
 			"status", c.Writer.Status(),

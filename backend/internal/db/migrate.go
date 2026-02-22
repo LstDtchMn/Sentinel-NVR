@@ -90,7 +90,10 @@ func runMigrations(db *sql.DB, logger *slog.Logger) error {
 				continue
 			}
 			if _, err := tx.Exec(stmt); err != nil {
-				tx.Rollback()
+				if rbErr := tx.Rollback(); rbErr != nil {
+					logger.Warn("rollback failed after migration statement error",
+						"migration", entry.Name(), "rollback_error", rbErr)
+				}
 				return fmt.Errorf("executing statement in migration %s: %w\nstatement: %s", entry.Name(), err, stmt)
 			}
 		}
@@ -99,7 +102,10 @@ func runMigrations(db *sql.DB, logger *slog.Logger) error {
 			"INSERT INTO _migrations (version, name) VALUES (?, ?)",
 			version, entry.Name(),
 		); err != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				logger.Warn("rollback failed after recording migration version",
+					"migration", entry.Name(), "rollback_error", rbErr)
+			}
 			return fmt.Errorf("recording migration %s: %w", entry.Name(), err)
 		}
 

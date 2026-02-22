@@ -36,10 +36,27 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// parseSQLiteTime parses a timestamp string from SQLite (CURRENT_TIMESTAMP or driver-formatted).
+// modernc.org/sqlite stores time.Time as text and does not auto-parse on scan.
+func parseSQLiteTime(s string) (time.Time, error) {
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		time.RFC3339,
+		time.RFC3339Nano,
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse timestamp %q", s)
+}
+
 // Create inserts a new recording segment with all available metadata.
 // For completed segments (reported by ffmpeg's segment_list), all fields are available.
 // For in-progress segments, end_time can be nil and duration_s/size_bytes zero.
 func (r *Repository) Create(ctx context.Context, rec *Record) (*Record, error) {
+	var createdStr string
 	row := r.db.QueryRowContext(ctx,
 		`INSERT INTO recordings (camera_id, camera_name, path, start_time, end_time, duration_s, size_bytes)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -47,25 +64,49 @@ func (r *Repository) Create(ctx context.Context, rec *Record) (*Record, error) {
 		rec.CameraID, rec.CameraName, rec.Path, rec.StartTime,
 		rec.EndTime, rec.DurationS, rec.SizeBytes,
 	)
-	if err := row.Scan(&rec.ID, &rec.CreatedAt); err != nil {
+	if err := row.Scan(&rec.ID, &createdStr); err != nil {
 		return nil, fmt.Errorf("inserting recording: %w", err)
 	}
+	createdAt, err := parseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("inserting recording: invalid created_at %q: %w", createdStr, err)
+	}
+	rec.CreatedAt = createdAt
 	return rec, nil
 }
 
 // Get returns a single recording by ID.
 func (r *Repository) Get(ctx context.Context, id int) (*Record, error) {
 	rec := &Record{}
+	var startStr, createdStr string
+	var endStr *string
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, camera_id, camera_name, path, start_time, end_time, duration_s, size_bytes, created_at
 		 FROM recordings WHERE id = ?`, id,
-	).Scan(&rec.ID, &rec.CameraID, &rec.CameraName, &rec.Path, &rec.StartTime,
-		&rec.EndTime, &rec.DurationS, &rec.SizeBytes, &rec.CreatedAt)
+	).Scan(&rec.ID, &rec.CameraID, &rec.CameraName, &rec.Path, &startStr,
+		&endStr, &rec.DurationS, &rec.SizeBytes, &createdStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("getting recording: %w", err)
+	}
+	startTime, err := parseSQLiteTime(startStr)
+	if err != nil {
+		return nil, fmt.Errorf("getting recording %d: invalid start_time %q: %w", id, startStr, err)
+	}
+	rec.StartTime = startTime
+	createdAt, err := parseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("getting recording %d: invalid created_at %q: %w", id, createdStr, err)
+	}
+	rec.CreatedAt = createdAt
+	if endStr != nil {
+		t, err := parseSQLiteTime(*endStr)
+		if err != nil {
+			return nil, fmt.Errorf("getting recording %d: invalid end_time %q: %w", id, *endStr, err)
+		}
+		rec.EndTime = &t
 	}
 	return rec, nil
 }
@@ -92,10 +133,6 @@ func (r *Repository) List(ctx context.Context, cameraName string, start, end tim
 	}
 
 	query += " ORDER BY start_time DESC"
-
-	if limit <= 0 {
-		limit = 50
-	}
 	query += " LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 
@@ -105,12 +142,31 @@ func (r *Repository) List(ctx context.Context, cameraName string, start, end tim
 	}
 	defer rows.Close()
 
-	var recordings []Record
+	recordings := []Record{}
 	for rows.Next() {
 		var rec Record
-		if err := rows.Scan(&rec.ID, &rec.CameraID, &rec.CameraName, &rec.Path, &rec.StartTime,
-			&rec.EndTime, &rec.DurationS, &rec.SizeBytes, &rec.CreatedAt); err != nil {
+		var startStr, createdStr string
+		var endStr *string
+		if err := rows.Scan(&rec.ID, &rec.CameraID, &rec.CameraName, &rec.Path, &startStr,
+			&endStr, &rec.DurationS, &rec.SizeBytes, &createdStr); err != nil {
 			return nil, fmt.Errorf("scanning recording: %w", err)
+		}
+		startTime, err := parseSQLiteTime(startStr)
+		if err != nil {
+			return nil, fmt.Errorf("scanning recording: invalid start_time %q: %w", startStr, err)
+		}
+		rec.StartTime = startTime
+		createdAt, err := parseSQLiteTime(createdStr)
+		if err != nil {
+			return nil, fmt.Errorf("scanning recording: invalid created_at %q: %w", createdStr, err)
+		}
+		rec.CreatedAt = createdAt
+		if endStr != nil {
+			t, err := parseSQLiteTime(*endStr)
+			if err != nil {
+				return nil, fmt.Errorf("scanning recording: invalid end_time %q: %w", *endStr, err)
+			}
+			rec.EndTime = &t
 		}
 		recordings = append(recordings, rec)
 	}

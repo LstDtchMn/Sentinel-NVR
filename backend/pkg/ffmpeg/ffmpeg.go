@@ -37,21 +37,6 @@ func Probe(ctx context.Context, streamURL string) (*ProbeResult, error) {
 	return nil, fmt.Errorf("not yet implemented")
 }
 
-// RecordArgs builds FFmpeg arguments for direct-to-disk recording (no transcode).
-func RecordArgs(streamURL, outputPattern string, segmentDurationSec int) []string {
-	return []string{
-		"-rtsp_transport", "tcp",
-		"-i", streamURL,
-		"-c", "copy",
-		"-f", "segment",
-		"-segment_time", fmt.Sprintf("%d", segmentDurationSec),
-		"-segment_format", "mp4",
-		"-reset_timestamps", "1",
-		"-strftime", "1",
-		outputPattern,
-	}
-}
-
 // DetectArgs builds FFmpeg arguments for decoding a sub-stream for AI detection.
 // Outputs raw frames to stdout at a reduced FPS for the detection pipeline.
 func DetectArgs(streamURL string, width, height, fps int, hwaccel HWAccel) []string {

@@ -192,6 +192,15 @@ func (r *Repository) SeedFromConfig(ctx context.Context, cameras []config.Camera
 	}
 
 	for _, cam := range cameras {
+		// Validate each camera from the YAML config the same way the API does,
+		// so invalid names or stream URLs don't silently enter the database.
+		rec := &CameraRecord{
+			Name:       cam.Name,
+			MainStream: cam.MainStream,
+		}
+		if err := ValidateCameraInput(rec); err != nil {
+			return fmt.Errorf("seeding camera %q: invalid config: %w", cam.Name, err)
+		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO cameras (name, enabled, main_stream, sub_stream, record, detect,
 			                     onvif_host, onvif_port, onvif_user, onvif_pass)
@@ -245,11 +254,11 @@ func scanCameraRow(row *sql.Row) (CameraRecord, error) {
 }
 
 // isUniqueConstraintError checks if a SQLite error is a UNIQUE constraint violation.
+// Only matches "UNIQUE constraint failed" — not CHECK, NOT NULL, or FK constraint errors,
+// which would be masked as duplicate-name errors (ErrDuplicate) if we matched too broadly.
 func isUniqueConstraintError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "constraint failed")
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }

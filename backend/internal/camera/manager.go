@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -19,11 +21,12 @@ import (
 )
 
 // validCameraName allows alphanumeric characters, spaces, dashes, and underscores.
-// Must be 1-64 characters, starting with an alphanumeric character.
+// Must be 1-64 characters, starting with an alphanumeric character, and the last
+// character must not be a space (trailing spaces produce confusing filesystem paths).
 // Phase 2 note: camera names become filesystem directory names for recordings.
 // Spaces are allowed here but must be sanitized (e.g. replaced with underscores)
 // when constructing recording paths: {hot_path}/{sanitized_name}/{date}/{time}.mp4
-var validCameraName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$`)
+var validCameraName = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9_-])?$`)
 
 // SanitizeName converts a camera name to a filesystem-safe directory name.
 // Spaces → underscores, lowercased. Used for recording paths only;
@@ -272,11 +275,19 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 	if needsRestart {
 		// Stop old pipeline if running
 		m.mu.Lock()
+		var oldPipeline *Pipeline
 		if pipeline, exists := m.cameras[name]; exists {
 			pipeline.Stop()
 			delete(m.cameras, name)
+			oldPipeline = pipeline
 		}
 		m.mu.Unlock()
+
+		// Wait for old pipeline goroutine to fully exit before starting new one,
+		// preventing two ffmpeg processes writing to the same camera's directory.
+		if oldPipeline != nil {
+			<-oldPipeline.startDone
+		}
 
 		// Remove old streams from go2rtc
 		m.removeFromGo2RTC(ctx, name, old.SubStream != "")
@@ -328,16 +339,34 @@ func (m *Manager) RemoveCamera(ctx context.Context, name string) error {
 
 	// Stop pipeline
 	m.mu.Lock()
+	var oldPipeline *Pipeline
 	if pipeline, exists := m.cameras[name]; exists {
 		pipeline.Stop()
 		delete(m.cameras, name)
+		oldPipeline = pipeline
 	}
 	m.mu.Unlock()
+
+	// Wait for pipeline goroutine to fully exit
+	if oldPipeline != nil {
+		<-oldPipeline.startDone
+	}
 
 	// Remove from go2rtc
 	m.removeFromGo2RTC(ctx, name, cam.SubStream != "")
 
-	// Delete from DB
+	// Delete recording files from disk first: if this fails, the caller gets an error
+	// and the DB record survives, allowing a retry. If we deleted the DB row first and
+	// then crashed, the files would be orphaned permanently with no reference.
+	sanitized := SanitizeName(name)
+	recDir := filepath.Join(m.storageCfg.HotPath, sanitized)
+	if err := os.RemoveAll(recDir); err != nil {
+		m.logger.Warn("failed to remove recording directory", "path", recDir, "error", err)
+		// Non-fatal: proceed with DB deletion so the camera can be removed from the UI.
+		// Orphaned files can be cleaned up by a storage maintenance job.
+	}
+
+	// Delete from DB (cascades to recordings table via FK)
 	if err := m.repo.Delete(ctx, name); err != nil {
 		return err
 	}

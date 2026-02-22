@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
@@ -38,9 +37,10 @@ type Recorder struct {
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
+	stdin  io.WriteCloser
 	cancel context.CancelFunc
 	active bool
-	done   chan struct{} // closed when ffmpeg process + reader goroutine finish
+	done   chan struct{} // closed when ffmpeg process + all I/O goroutines finish
 }
 
 // NewRecorder creates a recorder for a camera. Does not start ffmpeg.
@@ -96,8 +96,15 @@ func (r *Recorder) Start() error {
 		return fmt.Errorf("creating stderr pipe: %w", err)
 	}
 
-	// Set process group so we can signal the ffmpeg process directly
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Set process group for direct signal delivery (Unix only; no-op on Windows)
+	setSysProcAttr(cmd)
+
+	// Create stdin pipe for graceful shutdown (Windows: write 'q' to quit ffmpeg)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("creating stdin pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -105,6 +112,7 @@ func (r *Recorder) Start() error {
 	}
 
 	r.cmd = cmd
+	r.stdin = stdin
 	r.cancel = cancel
 	r.active = true
 	r.done = make(chan struct{})
@@ -114,16 +122,29 @@ func (r *Recorder) Start() error {
 		"stream", RedactStreamURL(r.rtspBase+"/"+r.cam.Name),
 		"segment_duration", r.segmentDuration,
 	)
+	r.bus.Publish(eventbus.Event{
+		Type:     "recording.started",
+		CameraID: r.cam.ID,
+		Label:    r.cam.Name,
+	})
 
-	// Goroutine: read completed segment paths from stdout
-	go r.readSegmentList(stdout)
+	// Track I/O goroutines so done isn't closed while they're still running.
+	// This prevents use-after-free when callers proceed after Stop() returns.
+	var ioWg sync.WaitGroup
+	ioWg.Add(2)
 
-	// Goroutine: drain stderr so ffmpeg doesn't block, log warnings
-	go r.drainStderr(stderr)
-
-	// Goroutine: wait for ffmpeg to exit
 	go func() {
-		defer close(r.done)
+		defer ioWg.Done()
+		r.readSegmentList(stdout)
+	}()
+
+	go func() {
+		defer ioWg.Done()
+		r.drainStderr(stderr)
+	}()
+
+	// Wait for ffmpeg exit, then wait for I/O goroutines, then signal done
+	go func() {
 		err := cmd.Wait()
 		r.mu.Lock()
 		wasActive := r.active
@@ -131,48 +152,58 @@ func (r *Recorder) Start() error {
 		r.mu.Unlock()
 
 		if wasActive {
-			// Unexpected exit — ffmpeg crashed or stream died
 			r.logger.Warn("ffmpeg exited unexpectedly", "error", err)
 		} else {
 			r.logger.Info("ffmpeg stopped cleanly")
 		}
+		r.bus.Publish(eventbus.Event{
+			Type:     "recording.stopped",
+			CameraID: r.cam.ID,
+			Label:    r.cam.Name,
+		})
+
+		ioWg.Wait()
+		close(r.done)
 	}()
 
 	return nil
 }
 
 // Stop gracefully shuts down the ffmpeg process.
-// Sends SIGINT for a clean segment finalization, then SIGKILL after timeout.
+// Sends interrupt for a clean segment finalization, then SIGKILL after timeout.
+// Safe to call concurrently — all callers block until ffmpeg and I/O goroutines finish.
 func (r *Recorder) Stop() {
 	r.mu.Lock()
-	if !r.active {
-		r.mu.Unlock()
-		return
-	}
-	r.active = false
-	cmd := r.cmd
-	cancel := r.cancel
 	done := r.done
+	if done == nil {
+		r.mu.Unlock()
+		return // never started
+	}
+
+	needsSignal := r.active
+	if needsSignal {
+		r.active = false
+	}
+	cmd := r.cmd
+	stdin := r.stdin
+	cancel := r.cancel
 	r.mu.Unlock()
 
-	if cmd != nil && cmd.Process != nil {
-		// Send SIGINT for graceful shutdown (ffmpeg finalizes the current segment)
-		_ = cmd.Process.Signal(syscall.SIGINT)
+	if needsSignal && cmd != nil && cmd.Process != nil {
+		// Send interrupt for graceful shutdown (ffmpeg finalizes the current segment)
+		_ = sendInterrupt(cmd.Process, stdin)
 
 		// Wait up to 5 seconds for ffmpeg to exit gracefully
 		select {
 		case <-done:
-			// Clean exit
+			return
 		case <-time.After(5 * time.Second):
-			r.logger.Warn("ffmpeg did not exit after SIGINT, sending SIGKILL")
+			r.logger.Warn("ffmpeg did not exit after interrupt, forcing kill")
 			cancel() // context cancellation sends SIGKILL via CommandContext
-			<-done   // wait for SIGKILL to take effect
 		}
-	} else if done != nil {
-		<-done
 	}
 
-	r.logger.Info("recorder stopped")
+	<-done // all callers wait for full cleanup (process exit + I/O goroutine drain)
 }
 
 // IsActive returns whether the ffmpeg process is currently running.
@@ -203,6 +234,12 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 	info, err := os.Stat(segPath)
 	if err != nil {
 		r.logger.Warn("could not stat completed segment", "path", segPath, "error", err)
+		return
+	}
+	if info.Size() == 0 {
+		// A 0-byte MP4 is unplayable — discard it rather than inserting a misleading DB record.
+		// This can occur if the RTSP source drops mid-segment or the disk fills up.
+		r.logger.Warn("discarding zero-byte segment", "path", segPath)
 		return
 	}
 
@@ -320,14 +357,17 @@ func (r *Recorder) ensureDirectories() error {
 func (r *Recorder) buildFFmpegArgs() []string {
 	sanitized := SanitizeName(r.cam.Name)
 	segDurationSec := r.segmentDuration * 60
-	outputPattern := filepath.Join(r.hotPath, sanitized, "%Y-%m-%d", "%H", "%M.%S.mp4")
+	// filepath.ToSlash ensures forward-slash separators on all platforms.
+	// ffmpeg's strftime expansion is performed by its C runtime, which requires
+	// forward slashes in the path template regardless of OS.
+	outputPattern := filepath.ToSlash(filepath.Join(r.hotPath, sanitized, "%Y-%m-%d", "%H", "%M.%S.mp4"))
 
 	return []string{
 		"-hide_banner",
 		"-loglevel", "warning",
 		// Input: go2rtc RTSP re-stream (TCP transport for reliability)
 		"-rtsp_transport", "tcp",
-		"-timeout", "10000000", // 10s RTSP timeout in microseconds
+		"-stimeout", "10000000", // 10s RTSP socket timeout in microseconds (ffmpeg RTSP demuxer option)
 		"-i", fmt.Sprintf("%s/%s", r.rtspBase, r.cam.Name),
 		// Output: copy streams (zero transcoding)
 		"-c", "copy",
@@ -336,10 +376,10 @@ func (r *Recorder) buildFFmpegArgs() []string {
 		"-segment_time", fmt.Sprintf("%d", segDurationSec),
 		"-segment_atclocktime", "1",     // align segments to wall clock
 		"-strftime", "1",                // use strftime tokens in output path
+		"-strftime_mkdir", "1",          // auto-create output directories (hour/day boundaries)
 		"-reset_timestamps", "1",        // each segment starts at t=0 (independently playable)
 		"-segment_list", "pipe:1",       // write completed segment paths to stdout
 		"-segment_list_type", "flat",    // one path per line
-		"-break_non_keyframes", "1",     // allow splitting at non-keyframe (more accurate timing)
 		outputPattern,
 	}
 }

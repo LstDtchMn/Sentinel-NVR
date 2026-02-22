@@ -4,7 +4,9 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -113,6 +115,19 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("storage.segment_duration must be >= 1, got %d", cfg.Storage.SegmentDuration)
 	}
 
+	if !filepath.IsAbs(cfg.Storage.HotPath) {
+		return fmt.Errorf("storage.hot_path must be an absolute path, got %q", cfg.Storage.HotPath)
+	}
+	if !filepath.IsAbs(cfg.Storage.ColdPath) {
+		return fmt.Errorf("storage.cold_path must be an absolute path, got %q", cfg.Storage.ColdPath)
+	}
+	if cfg.Storage.HotRetentionDays < 1 {
+		return fmt.Errorf("storage.hot_retention_days must be >= 1, got %d", cfg.Storage.HotRetentionDays)
+	}
+	if cfg.Storage.ColdRetentionDays < 1 {
+		return fmt.Errorf("storage.cold_retention_days must be >= 1, got %d", cfg.Storage.ColdRetentionDays)
+	}
+
 	// Validate confidence threshold is within the model output range [0.0, 1.0].
 	// A value > 1.0 silently suppresses all detections; < 0.0 is undefined.
 	if cfg.Detection.ConfidenceThreshold != nil {
@@ -120,6 +135,15 @@ func Validate(cfg *Config) error {
 		if t < 0.0 || t > 1.0 {
 			return fmt.Errorf("detection.confidence_threshold %g is out of range [0.0, 1.0]", t)
 		}
+	}
+
+	// Validate go2rtc API and RTSP URLs so misconfiguration is caught at startup,
+	// not at the first outbound network call when error messages are harder to correlate.
+	if err := validateURL(cfg.Go2RTC.APIURL, "go2rtc.api_url"); err != nil {
+		return err
+	}
+	if err := validateURL(cfg.Go2RTC.RTSPURL, "go2rtc.rtsp_url"); err != nil {
+		return err
 	}
 
 	// Check for duplicate camera names — duplicates silently overwrite in the manager map
@@ -158,6 +182,26 @@ func (d *DetectionConfig) ConfidenceThresholdValue() float64 {
 		return *d.ConfidenceThreshold
 	}
 	return 0.6
+}
+
+// validateURL checks that a URL string has a valid scheme and host.
+// Used by Validate to catch misconfigured go2rtc URLs before they cause
+// confusing network errors at runtime.
+func validateURL(raw, field string) error {
+	if raw == "" {
+		return fmt.Errorf("%s must not be empty", field)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
+	}
+	if u.Scheme == "" {
+		return fmt.Errorf("%s has no scheme (expected http/https/rtsp)", field)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s has no host", field)
+	}
+	return nil
 }
 
 func setDefaults(cfg *Config) {

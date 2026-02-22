@@ -22,6 +22,7 @@ import (
 type Server struct {
 	cfg        *config.Config
 	version    string
+	startTime  time.Time
 	db         *sql.DB
 	camManager *camera.Manager
 	camRepo    *camera.Repository
@@ -44,6 +45,7 @@ func New(cfg *config.Config, version string, db *sql.DB, camManager *camera.Mana
 	s := &Server{
 		cfg:        cfg,
 		version:    version,
+		startTime:  time.Now(),
 		db:         db,
 		camManager: camManager,
 		camRepo:    camRepo,
@@ -62,9 +64,9 @@ func New(cfg *config.Config, version string, db *sql.DB, camManager *camera.Mana
 	// Routes
 	s.registerRoutes()
 
-	// TODO: Phase 2 — WriteTimeout of 15s will kill WebSocket/SSE connections.
-	// When adding real-time event streaming, either disable WriteTimeout or use
-	// http.ResponseController.SetWriteDeadline() per-connection.
+	// TODO: Phase 3 — WriteTimeout of 15s will kill WebSocket/SSE connections.
+	// Phase 2 uses http.ResponseController.SetWriteDeadline() per-connection for
+	// file streaming. Phase 3 will need a similar approach for real-time events.
 	s.httpServer = &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
 		Handler:      router,

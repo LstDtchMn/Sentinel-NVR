@@ -184,6 +184,11 @@ class ApiClient {
         throw new Error(`API error ${response.status}: ${detail}`);
       }
 
+      // 204 No Content has an empty body — return undefined rather than attempting
+      // JSON.parse on an empty response, which would throw a SyntaxError.
+      if (response.status === 204) {
+        return undefined as unknown as T;
+      }
       return (await response.json()) as T;
     } finally {
       clearTimeout(timeoutId);

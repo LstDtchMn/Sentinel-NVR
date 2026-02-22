@@ -86,8 +86,31 @@ func (b *Bus) Publish(event Event) {
 	}
 }
 
-// TODO: Phase 2 — Add Unsubscribe(ch) method to remove a single subscriber
-// without closing the entire bus, needed for WebSocket client disconnect cleanup.
+// Unsubscribe removes a single subscriber channel from the bus.
+// The channel is NOT closed — the caller owns its lifetime.
+// Typically called when a WebSocket/SSE client disconnects (Phase 3).
+// Safe to call after Close() (no-op because all subscribers are already removed).
+func (b *Bus) Unsubscribe(ch <-chan Event) {
+	if b.closed.Load() {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for topic, subs := range b.subscribers {
+		for i, sub := range subs {
+			// Convert bidirectional chan to receive-only for comparison.
+			// Channel values are equal when they reference the same underlying channel.
+			if (<-chan Event)(sub) == ch {
+				b.subscribers[topic] = append(subs[:i], subs[i+1:]...)
+				if len(b.subscribers[topic]) == 0 {
+					delete(b.subscribers, topic)
+				}
+				return
+			}
+		}
+	}
+}
 
 // Close shuts down the bus and closes all subscriber channels.
 // After Close(), Publish() is a safe no-op — no panic on send-to-closed-channel.

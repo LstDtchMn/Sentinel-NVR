@@ -19,8 +19,6 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 )
 
-var startTime = time.Now()
-
 // registerRoutes mounts all API v1 endpoints on the Gin router.
 func (s *Server) registerRoutes() {
 	v1 := s.router.Group("/api/v1")
@@ -78,7 +76,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(statusCode, gin.H{
 		"status":             statusText,
 		"version":            s.version,
-		"uptime":             time.Since(startTime).Round(time.Second).String(),
+		"uptime":             time.Since(s.startTime).Round(time.Second).String(),
 		"go_version":         runtime.Version(),
 		"os":                 runtime.GOOS,
 		"arch":               runtime.GOARCH,
@@ -180,12 +178,27 @@ func (s *Server) handleGetCamera(c *gin.Context) {
 }
 
 // handleCameraStatus returns the detailed pipeline status of a single camera.
+// Falls back to a DB lookup for disabled cameras (no active pipeline) so that
+// a valid-but-disabled camera returns idle status instead of 404.
 func (s *Server) handleCameraStatus(c *gin.Context) {
 	name := c.Param("name")
 	ps, ok := s.camManager.Status(name)
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "camera not found"})
-		return
+		// Camera may exist in DB but be disabled (no pipeline). Check DB to distinguish
+		// "disabled camera" (→ idle status) from "unknown camera" (→ 404).
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+		cam, err := s.camManager.GetCamera(ctx, name)
+		if errors.Is(err, camera.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "camera not found"})
+			return
+		}
+		if err != nil {
+			s.logger.Error("failed to check camera existence for status", "name", name, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		ps = cam.PipelineStatus
 	}
 	c.JSON(http.StatusOK, ps)
 }
@@ -315,7 +328,7 @@ func (s *Server) handleDeleteCamera(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "camera '" + name + "' deleted"})
+	c.Status(http.StatusNoContent)
 }
 
 // handleListRecordings returns recording segments with optional filtering.
@@ -326,8 +339,8 @@ func (s *Server) handleListRecordings(c *gin.Context) {
 	offsetStr := c.DefaultQuery("offset", "0")
 
 	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+	if err != nil || limit < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be between 1 and 1000"})
 		return
 	}
 	if limit > 1000 {
@@ -423,21 +436,24 @@ func (s *Server) handlePlayRecording(c *gin.Context) {
 		return
 	}
 
-	// Validate that the path is under hot or cold storage to prevent path traversal.
+	// Resolve symlinks to get the real path — filepath.Clean alone does not prevent a symlink
+	// within HotPath from pointing outside the storage boundary (CG4 security).
+	// EvalSymlinks also verifies the file exists, combining the path traversal and existence checks.
 	cleanPath := filepath.Clean(rec.Path)
-	hotBase := filepath.Clean(s.cfg.Storage.HotPath)
-	coldBase := filepath.Clean(s.cfg.Storage.ColdPath)
-	sep := string(filepath.Separator)
-	if !strings.HasPrefix(cleanPath, hotBase+sep) && !strings.HasPrefix(cleanPath, coldBase+sep) {
-		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path)
-		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.logger.Warn("recording file missing from disk", "id", id, "path", rec.Path)
+			c.JSON(http.StatusNotFound, gin.H{"error": "recording file not found on disk"})
+		} else {
+			s.logger.Error("failed to resolve recording path", "id", id, "path", rec.Path, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		}
 		return
 	}
-
-	// Verify file exists before serving
-	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
-		s.logger.Warn("recording file missing from disk", "id", id, "path", rec.Path)
-		c.JSON(http.StatusNotFound, gin.H{"error": "recording file not found on disk"})
+	if !isUnderPath(resolvedPath, s.cfg.Storage.HotPath) && !isUnderPath(resolvedPath, s.cfg.Storage.ColdPath) {
+		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path, "resolved", resolvedPath)
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		return
 	}
 
@@ -447,10 +463,13 @@ func (s *Server) handlePlayRecording(c *gin.Context) {
 	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 		s.logger.Warn("failed to clear write deadline for file transfer", "error", err)
 	}
-	http.ServeFile(c.Writer, c.Request, cleanPath)
+	http.ServeFile(c.Writer, c.Request, resolvedPath)
 }
 
 // handleDeleteRecording deletes a recording segment from DB and disk.
+// DB record is deleted first — a leaked file is recoverable; a dangling DB row is not.
+// Uses separate contexts for the Get and Delete operations so a slow Get cannot
+// consume the full budget and leave the Delete with no time remaining.
 func (s *Server) handleDeleteRecording(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -458,10 +477,11 @@ func (s *Server) handleDeleteRecording(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
-	defer cancel()
+	// Lookup context is tied to the request so client cancellation is respected.
+	lookupCtx, lookupCancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer lookupCancel()
 
-	rec, err := s.recRepo.Get(ctx, id)
+	rec, err := s.recRepo.Get(lookupCtx, id)
 	if errors.Is(err, recording.ErrNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "recording not found"})
 		return
@@ -472,17 +492,54 @@ func (s *Server) handleDeleteRecording(c *gin.Context) {
 		return
 	}
 
-	// Delete file from disk (ignore error if already gone)
-	if err := os.Remove(rec.Path); err != nil && !os.IsNotExist(err) {
-		s.logger.Warn("failed to delete recording file", "id", id, "path", rec.Path, "error", err)
+	// Validate path before deletion (lexical check — symlink check done per file below).
+	cleanPath := filepath.Clean(rec.Path)
+	if !isUnderPath(cleanPath, s.cfg.Storage.HotPath) && !isUnderPath(cleanPath, s.cfg.Storage.ColdPath) {
+		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path)
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
 	}
 
-	// Delete DB record
-	if err := s.recRepo.Delete(ctx, id); err != nil {
+	// Delete context uses context.Background() — we want to complete the write even if
+	// the client disconnects mid-request. Fresh budget ensures Get timing doesn't affect it.
+	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer deleteCancel()
+
+	// Delete DB record first — a leaked file on disk is recoverable by a cleanup job;
+	// a dangling DB reference after file deletion is not.
+	if err := s.recRepo.Delete(deleteCtx, id); err != nil {
 		s.logger.Error("failed to delete recording from DB", "id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "recording deleted"})
+	// Resolve symlinks before file deletion to prevent symlink-based path escapes.
+	// If the file is already gone, that's fine — the DB row was the critical state.
+	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
+	if err == nil {
+		// File exists — verify resolved path is also under storage before deleting.
+		if isUnderPath(resolvedPath, s.cfg.Storage.HotPath) || isUnderPath(resolvedPath, s.cfg.Storage.ColdPath) {
+			if err := os.Remove(resolvedPath); err != nil && !os.IsNotExist(err) {
+				s.logger.Warn("failed to delete recording file", "id", id, "path", resolvedPath, "error", err)
+			}
+		} else {
+			s.logger.Warn("resolved recording path escapes storage boundary (symlink), file not deleted",
+				"id", id, "path", rec.Path, "resolved", resolvedPath)
+		}
+	} else if !os.IsNotExist(err) {
+		s.logger.Warn("could not resolve recording path for file deletion", "id", id, "path", cleanPath, "error", err)
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// isUnderPath checks if cleanPath is contained within basePath.
+// Uses filepath.Rel for platform-safe path containment checking.
+func isUnderPath(cleanPath, basePath string) bool {
+	base := filepath.Clean(basePath)
+	rel, err := filepath.Rel(base, cleanPath)
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..")
 }

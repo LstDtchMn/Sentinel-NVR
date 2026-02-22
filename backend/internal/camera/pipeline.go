@@ -45,14 +45,21 @@ type PipelineStatus struct {
 type Pipeline struct {
 	cam       *CameraRecord
 	g2r       *go2rtc.Client
+	bus       *eventbus.Bus
 	recorder  *Recorder // nil if cam.Record is false
 	logger    *slog.Logger
 	ctx       context.Context    // cancelled by Stop() to unblock in-flight go2rtc calls
 	ctxCancel context.CancelFunc
 	stopCh    chan struct{}
 	stopOnce  sync.Once
+	startDone chan struct{} // closed when Start() returns; used to wait for full pipeline exit
 
-	recordingStartFailed bool // suppresses repeated error logs after first recorder.Start() failure
+	// recordingStartFailed suppresses repeated error logs after first recorder.Start() failure.
+	// Only accessed from the Start() goroutine's health check loop; no mutex needed.
+	// recordingFailCount tracks consecutive failures; a periodic log fires every 12 ticks (~1 min)
+	// so operators see ongoing recorder errors (e.g. ffmpeg not installed) — not just the first one.
+	recordingStartFailed bool
+	recordingFailCount   int
 
 	mu     sync.RWMutex
 	status PipelineStatus
@@ -74,10 +81,12 @@ func NewPipeline(
 	p := &Pipeline{
 		cam:       cam,
 		g2r:       g2r,
+		bus:       bus,
 		logger:    logger.With("camera", cam.Name),
 		ctx:       ctx,
 		ctxCancel: ctxCancel,
 		stopCh:    make(chan struct{}),
+		startDone: make(chan struct{}),
 		status:    PipelineStatus{State: StateIdle},
 	}
 
@@ -93,6 +102,7 @@ func NewPipeline(
 // the stream has active producers (i.e. the RTSP source is connected).
 // When the stream is active and recording is enabled, ffmpeg is started.
 func (p *Pipeline) Start() {
+	defer close(p.startDone)
 	p.setStatus(func(s *PipelineStatus) {
 		s.State = StateConnecting
 	})
@@ -168,6 +178,8 @@ func (p *Pipeline) checkStreamHealth() {
 	var needsResync bool
 	var needsStartRecording bool
 	var needsStopRecording bool
+	var publishConnected bool
+	var publishDisconnected bool
 
 	recorderActive := p.recorder != nil && p.recorder.IsActive()
 
@@ -178,6 +190,7 @@ func (p *Pipeline) checkStreamHealth() {
 		if mainActive {
 			if s.State != StateStreaming && s.State != StateRecording {
 				logStreamActive = true
+				publishConnected = true // first tick the stream becomes active (CG8)
 			}
 			if s.ConnectedAt == nil {
 				now := time.Now()
@@ -198,6 +211,9 @@ func (p *Pipeline) checkStreamHealth() {
 			}
 		} else if mainExists && mainInfo != nil {
 			// Stream is registered but has no producer — camera disconnected
+			if s.State == StateStreaming || s.State == StateRecording {
+				publishDisconnected = true // stream was active, now lost (CG8)
+			}
 			s.State = StateConnecting
 			s.LastError = "waiting for camera to connect"
 			s.ConnectedAt = nil
@@ -207,6 +223,9 @@ func (p *Pipeline) checkStreamHealth() {
 			}
 		} else {
 			// Stream not registered in go2rtc — needs re-sync (go2rtc restart recovery)
+			if s.State == StateStreaming || s.State == StateRecording {
+				publishDisconnected = true // stream was active, now unregistered (CG8)
+			}
 			needsResync = true
 			s.State = StateError
 			s.LastError = "stream not registered in go2rtc"
@@ -222,10 +241,27 @@ func (p *Pipeline) checkStreamHealth() {
 		p.logger.Info("camera stream active")
 	}
 
+	// Publish state transition events to the bus (CG8) for Phase 3 SSE and Phase 6 timeline.
+	if publishConnected {
+		p.bus.Publish(eventbus.Event{
+			Type:     "camera.connected",
+			CameraID: p.cam.ID,
+			Label:    p.cam.Name,
+		})
+	}
+	if publishDisconnected {
+		p.bus.Publish(eventbus.Event{
+			Type:     "camera.disconnected",
+			CameraID: p.cam.ID,
+			Label:    p.cam.Name,
+		})
+	}
+
 	// Stop recording first if needed (before re-sync or other actions)
 	if needsStopRecording && p.recorder != nil {
 		p.recorder.Stop()
 		p.recordingStartFailed = false // reset so the next start attempt is logged fresh
+		p.recordingFailCount = 0
 		p.logger.Info("recording stopped (stream lost)")
 	}
 
@@ -238,9 +274,12 @@ func (p *Pipeline) checkStreamHealth() {
 	// ensureDirectories() is called inside Recorder.Start() — no pre-call needed.
 	if needsStartRecording && p.recorder != nil {
 		if err := p.recorder.Start(); err != nil {
-			// Log only on the first consecutive failure to avoid log spam.
-			if !p.recordingStartFailed {
-				p.logger.Error("failed to start recording", "error", err)
+			p.recordingFailCount++
+			// Log on first failure, then every 12 ticks (~1 min at 5s interval), so operators
+			// see persistent failures (e.g. ffmpeg not installed) without log flooding.
+			if !p.recordingStartFailed || p.recordingFailCount%12 == 0 {
+				p.logger.Error("failed to start recording",
+					"error", err, "consecutive_failures", p.recordingFailCount)
 				p.recordingStartFailed = true
 			}
 			p.setStatus(func(s *PipelineStatus) {
@@ -248,6 +287,7 @@ func (p *Pipeline) checkStreamHealth() {
 			})
 		} else {
 			p.recordingStartFailed = false
+			p.recordingFailCount = 0
 			p.setStatus(func(s *PipelineStatus) {
 				s.State = StateRecording
 				s.Recording = true

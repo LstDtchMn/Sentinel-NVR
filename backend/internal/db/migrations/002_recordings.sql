@@ -15,3 +15,4 @@ CREATE TABLE IF NOT EXISTS recordings (
 
 CREATE INDEX IF NOT EXISTS idx_recordings_camera_time ON recordings(camera_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_recordings_time ON recordings(start_time);
+CREATE INDEX IF NOT EXISTS idx_recordings_camera_name ON recordings(camera_name, start_time);

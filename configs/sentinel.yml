@@ -27,7 +27,7 @@ detection:
 
 go2rtc:
   api_url: "http://go2rtc:1984"     # Override with GO2RTC_API env var
-  rtsp_url: "rtsp://go2rtc:8554"    # Override with GO2RTC_RTSP env var (ffmpeg reads from this)
+  rtsp_url: "rtsp://go2rtc:8554"    # Container-internal port; host port is 8555. Override with GO2RTC_RTSP env var.
 
 cameras: []
   # Example camera configuration:
