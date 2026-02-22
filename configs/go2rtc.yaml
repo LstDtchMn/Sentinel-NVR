@@ -1,0 +1,16 @@
+# go2rtc configuration for Sentinel NVR
+# Streams are managed dynamically via the REST API by the sentinel backend.
+# Do NOT add streams here — use the Sentinel NVR web UI or API instead.
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+# WebRTC — Phase 3 (disabled until live view implementation)
+# webrtc:
+#   listen: ":8555"
+
+log:
+  level: info

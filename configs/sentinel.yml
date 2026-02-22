@@ -12,7 +12,7 @@ storage:
   hot_retention_days: 3        # Days to keep on hot storage
   cold_retention_days: 30      # Days to keep on cold storage
   segment_duration: 10         # Recording segment length in minutes
-  segment_format: "fmp4"       # fmp4 | mkv
+  segment_format: "mp4"        # mp4 (independently playable) | mkv
 
 database:
   path: "/data/sentinel.db"
@@ -24,6 +24,9 @@ detection:
   model: "general_security"    # Pre-packaged model name
   gpu_device: "auto"           # auto | /dev/dri/renderD128 | cuda:0 | etc.
   confidence_threshold: 0.6
+
+go2rtc:
+  api_url: "http://go2rtc:1984"   # Override with GO2RTC_API env var
 
 cameras: []
   # Example camera configuration:

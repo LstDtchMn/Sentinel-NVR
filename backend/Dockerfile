@@ -1,5 +1,5 @@
 # ---- Build Stage ----
-FROM golang:1.23-bookworm AS builder
+FROM golang:1.24-bookworm AS builder
 
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -18,23 +18,25 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     # Intel GPU (VAAPI / QSV) drivers
-    intel-media-va-driver-non-free \
     vainfo \
+    # wget is needed by the Docker health check (docker-compose.yml)
+    wget \
     # Shared libs needed at runtime
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd -r -s /bin/false sentinel
+# Create non-root user with fixed UID/GID for volume permission consistency.
+# Must match the chown instructions in docker-compose.yml (UID 10001).
+RUN groupadd -r -g 10001 sentinel && useradd -r -u 10001 -g sentinel -s /bin/false sentinel
 
 # Copy binary
 COPY --from=builder /sentinel /usr/local/bin/sentinel
 
 # Default directories
 RUN mkdir -p /etc/sentinel /data /media/hot /media/cold \
-    && chown -R sentinel:sentinel /data /media
+    && chown -R sentinel:sentinel /etc/sentinel /data /media
 
-COPY --chown=sentinel:sentinel configs/sentinel.yml /etc/sentinel/sentinel.yml
+# Removed COPY configs/sentinel.yml since it is mounted via docker-compose
 
 USER sentinel
 

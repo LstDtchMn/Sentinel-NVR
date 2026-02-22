@@ -1,7 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
-  darkMode: "class",
+  // No darkMode toggle — the app is always dark-themed via base colors.
   theme: {
     extend: {
       colors: {
@@ -14,6 +14,16 @@ export default {
           900: "#1b2a4a",
           950: "#0f172a",
         },
+        surface: {
+          base: "#0D1117",
+          raised: "#161B22",
+          overlay: "#21262D",
+        },
+        border: {
+          DEFAULT: "#30363D",
+        },
+        muted: "#8B949E",
+        faint: "#484F58",
       },
     },
   },

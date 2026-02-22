@@ -38,8 +38,8 @@ docker-build: ## Build Docker images without starting
 docker-logs: ## Tail logs from all services
 	docker compose logs -f
 
-docker-gpu-nvidia: ## Start with NVIDIA GPU support
-	docker compose --profile gpu-nvidia up --build -d
+docker-gpu-nvidia: ## Start with NVIDIA GPU (uncomment deploy block in docker-compose.yml first)
+	docker compose up --build -d
 
 # ---- Frontend ----
 frontend-dev: ## Start frontend dev server
@@ -49,7 +49,7 @@ frontend-build: ## Build frontend for production
 	cd frontend && npm run build
 
 frontend-install: ## Install frontend dependencies
-	cd frontend && npm install
+	cd frontend && npm ci
 
 # ---- Help ----
 help: ## Show this help

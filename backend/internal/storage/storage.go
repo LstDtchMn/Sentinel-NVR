@@ -9,11 +9,13 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 )
 
+// Manager orchestrates hot/cold storage directories and retention cleanup.
 type Manager struct {
 	cfg    *config.StorageConfig
 	logger *slog.Logger
 }
 
+// NewManager creates a storage manager for the given configuration.
 func NewManager(cfg *config.StorageConfig, logger *slog.Logger) *Manager {
 	return &Manager{
 		cfg:    cfg,

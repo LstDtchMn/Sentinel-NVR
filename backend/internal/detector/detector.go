@@ -1,15 +1,18 @@
-// Package detector defines the AI inference interface.
+// Package detector defines the AI inference interface (CG10).
 // This is the key abstraction that allows swapping between
 // OpenVINO, TensorRT, CoreML, and Coral backends.
 package detector
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // Detection represents a single object found in a frame.
 type Detection struct {
-	Label      string  `json:"label"`       // e.g. "person", "vehicle", "dog"
-	Confidence float64 `json:"confidence"`  // 0.0 to 1.0
-	BBox       BBox    `json:"bbox"`        // Bounding box in normalized coordinates
+	Label      string  `json:"label"`      // e.g. "person", "vehicle", "dog"
+	Confidence float64 `json:"confidence"` // 0.0 to 1.0
+	BBox       BBox    `json:"bbox"`       // Bounding box in normalized coordinates
 }
 
 // BBox is a bounding box with coordinates normalized to [0, 1].
@@ -44,6 +47,25 @@ type Detector interface {
 	Name() string
 }
 
-// Registry maps backend names to constructor functions.
-// Backends register themselves at init() time.
-var Registry = map[string]func() Detector{}
+// registry maps backend names to constructor functions.
+// Protected by registryMu for goroutine safety.
+var (
+	registryMu sync.RWMutex
+	registry   = map[string]func() Detector{}
+)
+
+// Register adds a detector backend constructor to the global registry.
+// Typically called from init() functions in backend sub-packages.
+func Register(name string, fn func() Detector) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	registry[name] = fn
+}
+
+// Get returns the constructor for a named detector backend.
+func Get(name string) (func() Detector, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	fn, ok := registry[name]
+	return fn, ok
+}

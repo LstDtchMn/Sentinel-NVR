@@ -1,3 +1,5 @@
+// Package config handles loading, validating, and saving the sentinel.yml
+// configuration file. It defines all configuration structs and their defaults.
 package config
 
 import (
@@ -7,21 +9,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Config is the top-level application configuration loaded from sentinel.yml.
 type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Database  DatabaseConfig  `yaml:"database"`
 	Detection DetectionConfig `yaml:"detection"`
+	Go2RTC    Go2RTCConfig    `yaml:"go2rtc"`
 	Cameras   []CameraConfig  `yaml:"cameras"`
 	Watchdog  WatchdogConfig  `yaml:"watchdog"`
 }
 
+// Go2RTCConfig holds connection settings for the go2rtc sidecar (CG3).
+type Go2RTCConfig struct {
+	APIURL string `yaml:"api_url"`
+}
+
+// ServerConfig holds HTTP server settings (CG2).
 type ServerConfig struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
 	LogLevel string `yaml:"log_level"`
 }
 
+// StorageConfig defines hot/cold tiered storage paths and retention (R13, R14).
+// Phase 2: this struct must be passed through Manager → Pipeline for recording.
+// Pipeline needs HotPath to construct: {hot_path}/{camera_name}/{date}/{time}.mp4
 type StorageConfig struct {
 	HotPath           string `yaml:"hot_path"`
 	ColdPath          string `yaml:"cold_path"`
@@ -31,19 +44,22 @@ type StorageConfig struct {
 	SegmentFormat     string `yaml:"segment_format"`
 }
 
+// DatabaseConfig holds SQLite database settings (CG2).
 type DatabaseConfig struct {
 	Path    string `yaml:"path"`
 	WALMode bool   `yaml:"wal_mode"`
 }
 
+// DetectionConfig holds AI detection backend settings (CG10, R8).
 type DetectionConfig struct {
-	Enabled             bool    `yaml:"enabled"`
-	Backend             string  `yaml:"backend"`
-	Model               string  `yaml:"model"`
-	GPUDevice           string  `yaml:"gpu_device"`
-	ConfidenceThreshold float64 `yaml:"confidence_threshold"`
+	Enabled             bool     `yaml:"enabled"`
+	Backend             string   `yaml:"backend"`
+	Model               string   `yaml:"model"`
+	GPUDevice           string   `yaml:"gpu_device"`
+	ConfidenceThreshold *float64 `yaml:"confidence_threshold"` // pointer to distinguish unset from 0.0
 }
 
+// CameraConfig defines a single camera's RTSP streams and behavior (R1, R2).
 type CameraConfig struct {
 	Name       string      `yaml:"name"`
 	Enabled    bool        `yaml:"enabled"`
@@ -54,6 +70,7 @@ type CameraConfig struct {
 	ONVIF      ONVIFConfig `yaml:"onvif,omitempty"`
 }
 
+// ONVIFConfig holds ONVIF discovery and PTZ credentials for a camera.
 type ONVIFConfig struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
@@ -61,6 +78,7 @@ type ONVIFConfig struct {
 	Password string `yaml:"password"`
 }
 
+// WatchdogConfig controls the supervisor process (R4).
 type WatchdogConfig struct {
 	Enabled        bool `yaml:"enabled"`
 	HealthInterval int  `yaml:"health_interval"`
@@ -83,6 +101,45 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// Validate checks the configuration for logical errors that would cause
+// runtime failures. Call after Load and setDefaults.
+func Validate(cfg *Config) error {
+	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
+		return fmt.Errorf("server.port %d is out of range [1-65535]", cfg.Server.Port)
+	}
+
+	if cfg.Storage.SegmentDuration < 1 {
+		return fmt.Errorf("storage.segment_duration must be >= 1, got %d", cfg.Storage.SegmentDuration)
+	}
+
+	// Validate confidence threshold is within the model output range [0.0, 1.0].
+	// A value > 1.0 silently suppresses all detections; < 0.0 is undefined.
+	if cfg.Detection.ConfidenceThreshold != nil {
+		t := *cfg.Detection.ConfidenceThreshold
+		if t < 0.0 || t > 1.0 {
+			return fmt.Errorf("detection.confidence_threshold %g is out of range [0.0, 1.0]", t)
+		}
+	}
+
+	// Check for duplicate camera names — duplicates silently overwrite in the manager map
+	names := make(map[string]bool)
+	for i, cam := range cfg.Cameras {
+		if cam.Name == "" {
+			return fmt.Errorf("cameras[%d]: name is required", i)
+		}
+		if names[cam.Name] {
+			return fmt.Errorf("cameras[%d]: duplicate camera name %q", i, cam.Name)
+		}
+		names[cam.Name] = true
+
+		if cam.Enabled && cam.MainStream == "" {
+			return fmt.Errorf("camera %q: main_stream is required when enabled", cam.Name)
+		}
+	}
+
+	return nil
+}
+
 // Save writes the current configuration back to a YAML file.
 // Used by the Web UI when users change settings visually.
 func Save(path string, cfg *Config) error {
@@ -90,7 +147,16 @@ func Save(path string, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
+}
+
+// ConfidenceThreshold returns the effective detection confidence threshold,
+// defaulting to 0.6 if not explicitly configured.
+func (d *DetectionConfig) ConfidenceThresholdValue() float64 {
+	if d.ConfidenceThreshold != nil {
+		return *d.ConfidenceThreshold
+	}
+	return 0.6
 }
 
 func setDefaults(cfg *Config) {
@@ -119,7 +185,9 @@ func setDefaults(cfg *Config) {
 		cfg.Storage.SegmentDuration = 10
 	}
 	if cfg.Storage.SegmentFormat == "" {
-		cfg.Storage.SegmentFormat = "fmp4"
+		// Regular MP4 (not fragmented) — each segment is independently playable
+		// in VLC, browsers, etc. without needing an init segment (CG4).
+		cfg.Storage.SegmentFormat = "mp4"
 	}
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = "/data/sentinel.db"
@@ -130,8 +198,14 @@ func setDefaults(cfg *Config) {
 	if cfg.Detection.GPUDevice == "" {
 		cfg.Detection.GPUDevice = "auto"
 	}
-	if cfg.Detection.ConfidenceThreshold == 0 {
-		cfg.Detection.ConfidenceThreshold = 0.6
+	// ConfidenceThreshold default is handled by ConfidenceThresholdValue() method
+	// instead of overwriting 0.0 (which is a valid intentional value).
+	if cfg.Go2RTC.APIURL == "" {
+		cfg.Go2RTC.APIURL = "http://go2rtc:1984"
+	}
+	// Environment variable override for go2rtc URL (useful in Docker Compose)
+	if env := os.Getenv("GO2RTC_API"); env != "" {
+		cfg.Go2RTC.APIURL = env
 	}
 	if cfg.Watchdog.HealthInterval == 0 {
 		cfg.Watchdog.HealthInterval = 30
