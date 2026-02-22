@@ -30,6 +30,7 @@ export interface HealthStatus {
   os: string;
   arch: string;
   cameras_configured: number;
+  recordings_count: number;
   database: string;
   go2rtc: string;
 }
@@ -70,6 +71,28 @@ export interface CameraInput {
   sub_stream?: string;
   record?: boolean;
   detect?: boolean;
+}
+
+/** A single recording segment returned by the API. */
+export interface RecordingSegment {
+  id: number;
+  camera_id: number;
+  camera_name: string;
+  path: string;
+  start_time: string;
+  end_time: string | null;
+  duration_s: number;
+  size_bytes: number;
+  created_at: string;
+}
+
+/** Query parameters for listing recordings. */
+export interface RecordingListParams {
+  camera?: string;
+  start?: string; // RFC3339
+  end?: string;   // RFC3339
+  limit?: number;
+  offset?: number;
 }
 
 export interface SystemConfig {
@@ -206,6 +229,30 @@ class ApiClient {
 
   getConfig(signal?: AbortSignal): Promise<SystemConfig> {
     return this.request<SystemConfig>("/config", { signal });
+  }
+
+  getRecordings(params?: RecordingListParams, signal?: AbortSignal): Promise<RecordingSegment[]> {
+    const query = new URLSearchParams();
+    if (params?.camera) query.set("camera", params.camera);
+    if (params?.start) query.set("start", params.start);
+    if (params?.end) query.set("end", params.end);
+    if (params?.limit !== undefined) query.set("limit", String(params.limit));
+    if (params?.offset !== undefined) query.set("offset", String(params.offset));
+    const qs = query.toString();
+    return this.request<RecordingSegment[]>(`/recordings${qs ? `?${qs}` : ""}`, { signal });
+  }
+
+  getRecording(id: number, signal?: AbortSignal): Promise<RecordingSegment> {
+    return this.request<RecordingSegment>(`/recordings/${id}`, { signal });
+  }
+
+  async deleteRecording(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/recordings/${id}`, { method: "DELETE", signal });
+  }
+
+  /** Returns the URL for streaming/downloading a recording segment. */
+  recordingPlayURL(id: number): string {
+    return `${API_BASE}/recordings/${id}/play`;
   }
 }
 

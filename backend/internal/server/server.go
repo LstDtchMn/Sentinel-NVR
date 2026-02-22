@@ -14,6 +14,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/camera"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
 )
 
@@ -24,15 +25,16 @@ type Server struct {
 	db         *sql.DB
 	camManager *camera.Manager
 	camRepo    *camera.Repository
+	recRepo    *recording.Repository
 	g2r        *go2rtc.Client
-	eventBus   *eventbus.Bus
+	eventBus   *eventbus.Bus // Phase 3: used for WebSocket/SSE real-time event streaming
 	router     *gin.Engine
 	httpServer *http.Server
 	logger     *slog.Logger
 }
 
 // New creates a configured HTTP server with all routes registered.
-func New(cfg *config.Config, version string, db *sql.DB, camManager *camera.Manager, camRepo *camera.Repository, g2r *go2rtc.Client, eventBus *eventbus.Bus, logger *slog.Logger) *Server {
+func New(cfg *config.Config, version string, db *sql.DB, camManager *camera.Manager, camRepo *camera.Repository, recRepo *recording.Repository, g2r *go2rtc.Client, eventBus *eventbus.Bus, logger *slog.Logger) *Server {
 	if cfg.Server.LogLevel != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -45,6 +47,7 @@ func New(cfg *config.Config, version string, db *sql.DB, camManager *camera.Mana
 		db:         db,
 		camManager: camManager,
 		camRepo:    camRepo,
+		recRepo:    recRepo,
 		g2r:        g2r,
 		eventBus:   eventBus,
 		router:     router,

@@ -12,7 +12,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
 )
 
@@ -22,6 +24,15 @@ import (
 // Spaces are allowed here but must be sanitized (e.g. replaced with underscores)
 // when constructing recording paths: {hot_path}/{sanitized_name}/{date}/{time}.mp4
 var validCameraName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$`)
+
+// SanitizeName converts a camera name to a filesystem-safe directory name.
+// Spaces → underscores, lowercased. Used for recording paths only;
+// the DB and API keep the original name.
+func SanitizeName(name string) string {
+	s := strings.ToLower(name)
+	s = strings.ReplaceAll(s, " ", "_")
+	return s
+}
 
 // allowedStreamSchemes lists the protocols accepted for camera stream URLs.
 var allowedStreamSchemes = map[string]bool{
@@ -95,37 +106,51 @@ type CameraWithStatus struct {
 // and syncing their streams to go2rtc. Stop() waits for all pipeline
 // goroutines to finish before returning.
 type Manager struct {
-	repo    *Repository
-	g2r     *go2rtc.Client
-	bus     *eventbus.Bus
-	logger  *slog.Logger
-	cameras map[string]*Pipeline
-	wg      sync.WaitGroup
-	mu      sync.RWMutex
+	repo       *Repository
+	g2r        *go2rtc.Client
+	bus        *eventbus.Bus
+	storageCfg config.StorageConfig
+	rtspBase   string // go2rtc RTSP base URL (e.g. "rtsp://go2rtc:8554")
+	recRepo    *recording.Repository
+	logger     *slog.Logger
+	cameras    map[string]*Pipeline
+	wg         sync.WaitGroup
+	mu         sync.RWMutex
 }
 
 // NewManager creates a camera manager backed by the database and go2rtc.
-func NewManager(repo *Repository, g2r *go2rtc.Client, bus *eventbus.Bus, logger *slog.Logger) *Manager {
+func NewManager(
+	repo *Repository,
+	g2r *go2rtc.Client,
+	bus *eventbus.Bus,
+	storageCfg config.StorageConfig,
+	rtspBase string,
+	recRepo *recording.Repository,
+	logger *slog.Logger,
+) *Manager {
 	return &Manager{
-		repo:    repo,
-		g2r:     g2r,
-		bus:     bus,
-		logger:  logger.With("component", "camera_manager"),
-		cameras: make(map[string]*Pipeline),
+		repo:       repo,
+		g2r:        g2r,
+		bus:        bus,
+		storageCfg: storageCfg,
+		rtspBase:   rtspBase,
+		recRepo:    recRepo,
+		logger:     logger.With("component", "camera_manager"),
+		cameras:    make(map[string]*Pipeline),
 	}
 }
 
 // Start loads all enabled cameras from the database, syncs streams to go2rtc,
 // and starts pipeline goroutines.
+// go2rtc network calls run outside the write lock so that concurrent ListCameras
+// calls are not blocked for the full startup duration (up to 5s per camera).
 func (m *Manager) Start(ctx context.Context) error {
 	cameras, err := m.repo.List(ctx)
 	if err != nil {
 		return fmt.Errorf("loading cameras from database: %w", err)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	started := 0
 	for i := range cameras {
 		cam := cameras[i]
 		if !cam.Enabled {
@@ -133,6 +158,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			continue
 		}
 
+		// go2rtc sync runs outside the write lock — can take up to 5s per camera
 		if err := m.syncToGo2RTC(ctx, &cam); err != nil {
 			m.logger.Error("failed to sync camera to go2rtc",
 				"name", cam.Name,
@@ -141,16 +167,20 @@ func (m *Manager) Start(ctx context.Context) error {
 			// Don't fail startup — pipeline will detect missing stream
 		}
 
-		pipeline := NewPipeline(&cam, m.g2r, m.logger)
+		pipeline := NewPipeline(&cam, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.bus, m.logger)
+		m.mu.Lock()
 		m.cameras[cam.Name] = pipeline
 		m.wg.Add(1)
+		m.mu.Unlock()
+
+		started++
 		go func() {
 			defer m.wg.Done()
 			pipeline.Start()
 		}()
 	}
 
-	m.logger.Info("camera manager started", "active_cameras", len(m.cameras))
+	m.logger.Info("camera manager started", "active_cameras", started)
 	return nil
 }
 
@@ -189,7 +219,7 @@ func (m *Manager) AddCamera(ctx context.Context, cam *CameraRecord) (*CameraWith
 			)
 		}
 
-		pipeline := NewPipeline(created, m.g2r, m.logger)
+		pipeline := NewPipeline(created, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.bus, m.logger)
 		m.mu.Lock()
 		m.cameras[created.Name] = pipeline
 		m.wg.Add(1) // must be inside lock so Stop() can't race between map insert and wg tracking
@@ -236,7 +266,8 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 
 	streamChanged := old.MainStream != updated.MainStream || old.SubStream != updated.SubStream
 	enabledChanged := old.Enabled != updated.Enabled
-	needsRestart := streamChanged || enabledChanged
+	recordChanged := old.Record != updated.Record
+	needsRestart := streamChanged || enabledChanged || recordChanged
 
 	if needsRestart {
 		// Stop old pipeline if running
@@ -259,7 +290,7 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 				)
 			}
 
-			pipeline := NewPipeline(updated, m.g2r, m.logger)
+			pipeline := NewPipeline(updated, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.bus, m.logger)
 			m.mu.Lock()
 			m.cameras[name] = pipeline
 			m.wg.Add(1) // must be inside lock so Stop() can't race between map insert and wg tracking

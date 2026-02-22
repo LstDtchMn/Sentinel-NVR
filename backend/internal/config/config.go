@@ -22,7 +22,8 @@ type Config struct {
 
 // Go2RTCConfig holds connection settings for the go2rtc sidecar (CG3).
 type Go2RTCConfig struct {
-	APIURL string `yaml:"api_url"`
+	APIURL  string `yaml:"api_url"`
+	RTSPURL string `yaml:"rtsp_url"` // Phase 2: ffmpeg reads from go2rtc's RTSP re-stream
 }
 
 // ServerConfig holds HTTP server settings (CG2).
@@ -206,6 +207,12 @@ func setDefaults(cfg *Config) {
 	// Environment variable override for go2rtc URL (useful in Docker Compose)
 	if env := os.Getenv("GO2RTC_API"); env != "" {
 		cfg.Go2RTC.APIURL = env
+	}
+	if cfg.Go2RTC.RTSPURL == "" {
+		cfg.Go2RTC.RTSPURL = "rtsp://go2rtc:8554"
+	}
+	if env := os.Getenv("GO2RTC_RTSP"); env != "" {
+		cfg.Go2RTC.RTSPURL = env
 	}
 	if cfg.Watchdog.HealthInterval == 0 {
 		cfg.Watchdog.HealthInterval = 30

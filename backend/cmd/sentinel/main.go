@@ -21,6 +21,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/db"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/server"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/watchdog"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
@@ -98,16 +99,24 @@ func main() {
 	g2rCancel()
 	logger.Info("go2rtc connected")
 
-	// Initialize and start camera manager (DB-backed + go2rtc sync)
-	camManager := camera.NewManager(camRepo, g2rClient, bus, logger)
-	if err := camManager.Start(context.Background()); err != nil {
+	// Initialize recording repository (Phase 2 — segment tracking)
+	recRepo := recording.NewRepository(database)
+	logger.Info("recording repository initialized")
+
+	// Initialize and start camera manager (DB-backed + go2rtc sync + recording).
+	// Bounded context prevents startup from hanging indefinitely if go2rtc is slow.
+	camManager := camera.NewManager(camRepo, g2rClient, bus, cfg.Storage, cfg.Go2RTC.RTSPURL, recRepo, logger)
+	startCtx, startCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if err := camManager.Start(startCtx); err != nil {
+		startCancel()
 		logger.Error("camera manager failed to start", "error", err)
 		os.Exit(1)
 	}
+	startCancel()
 
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, version, database, camManager, camRepo, g2rClient, bus, logger)
+	srv := server.New(cfg, version, database, camManager, camRepo, recRepo, g2rClient, bus, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err

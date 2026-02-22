@@ -6,12 +6,17 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/camera"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 )
 
 var startTime = time.Now()
@@ -30,6 +35,12 @@ func (s *Server) registerRoutes() {
 		v1.POST("/cameras", s.handleCreateCamera)
 		v1.PUT("/cameras/:name", s.handleUpdateCamera)
 		v1.DELETE("/cameras/:name", s.handleDeleteCamera)
+
+		// Recording management (Phase 2)
+		v1.GET("/recordings", s.handleListRecordings)
+		v1.GET("/recordings/:id", s.handleGetRecording)
+		v1.GET("/recordings/:id/play", s.handlePlayRecording)
+		v1.DELETE("/recordings/:id", s.handleDeleteRecording)
 	}
 }
 
@@ -52,6 +63,11 @@ func (s *Server) handleHealth(c *gin.Context) {
 		s.logger.Error("camera count failed", "error", err)
 	}
 
+	recCount, err := s.recRepo.Count(c.Request.Context())
+	if err != nil {
+		s.logger.Error("recording count failed", "error", err)
+	}
+
 	statusCode := http.StatusOK
 	statusText := "ok"
 	if dbStatus == "error" || g2rStatus == "disconnected" {
@@ -67,6 +83,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"os":                 runtime.GOOS,
 		"arch":               runtime.GOARCH,
 		"cameras_configured": camCount,
+		"recordings_count":   recCount,
 		"database":           dbStatus,
 		"go2rtc":             g2rStatus,
 	})
@@ -299,4 +316,173 @@ func (s *Server) handleDeleteCamera(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "camera '" + name + "' deleted"})
+}
+
+// handleListRecordings returns recording segments with optional filtering.
+// Query params: camera (name), start (RFC3339), end (RFC3339), limit (int, max 1000), offset (int).
+func (s *Server) handleListRecordings(c *gin.Context) {
+	cameraName := c.Query("camera")
+	limitStr := c.DefaultQuery("limit", "50")
+	offsetStr := c.DefaultQuery("offset", "0")
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+		return
+	}
+	if limit > 1000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit exceeds maximum (1000)"})
+		return
+	}
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid offset"})
+		return
+	}
+
+	var start, end time.Time
+	if startStr := c.Query("start"); startStr != "" {
+		t, err := time.Parse(time.RFC3339, startStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start time (use RFC3339)"})
+			return
+		}
+		start = t
+	}
+	if endStr := c.Query("end"); endStr != "" {
+		t, err := time.Parse(time.RFC3339, endStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time (use RFC3339)"})
+			return
+		}
+		end = t
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	recordings, err := s.recRepo.List(ctx, cameraName, start, end, limit, offset)
+	if err != nil {
+		s.logger.Error("failed to list recordings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if recordings == nil {
+		recordings = []recording.Record{}
+	}
+	c.JSON(http.StatusOK, recordings)
+}
+
+// handleGetRecording returns a single recording segment's metadata.
+func (s *Server) handleGetRecording(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid recording ID"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	rec, err := s.recRepo.Get(ctx, id)
+	if errors.Is(err, recording.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "recording not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to get recording", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, rec)
+}
+
+// handlePlayRecording serves the MP4 file for a recording segment.
+// Uses http.ServeFile which supports Range headers for seeking.
+// The server WriteTimeout is cleared before file transfer so large segments
+// (200+ MB) are not truncated mid-transfer.
+func (s *Server) handlePlayRecording(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid recording ID"})
+		return
+	}
+
+	// DB lookup with a bounded timeout; file transfer runs without a deadline.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	rec, err := s.recRepo.Get(ctx, id)
+	if errors.Is(err, recording.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "recording not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to get recording for playback", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// Validate that the path is under hot or cold storage to prevent path traversal.
+	cleanPath := filepath.Clean(rec.Path)
+	hotBase := filepath.Clean(s.cfg.Storage.HotPath)
+	coldBase := filepath.Clean(s.cfg.Storage.ColdPath)
+	sep := string(filepath.Separator)
+	if !strings.HasPrefix(cleanPath, hotBase+sep) && !strings.HasPrefix(cleanPath, coldBase+sep) {
+		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path)
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	// Verify file exists before serving
+	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+		s.logger.Warn("recording file missing from disk", "id", id, "path", rec.Path)
+		c.JSON(http.StatusNotFound, gin.H{"error": "recording file not found on disk"})
+		return
+	}
+
+	// Clear the write deadline so large transfers aren't truncated at the server timeout.
+	// http.ServeFile sets Content-Type from the file extension — no manual header needed.
+	rc := http.NewResponseController(c.Writer)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		s.logger.Warn("failed to clear write deadline for file transfer", "error", err)
+	}
+	http.ServeFile(c.Writer, c.Request, cleanPath)
+}
+
+// handleDeleteRecording deletes a recording segment from DB and disk.
+func (s *Server) handleDeleteRecording(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid recording ID"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	rec, err := s.recRepo.Get(ctx, id)
+	if errors.Is(err, recording.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "recording not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to get recording for deletion", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// Delete file from disk (ignore error if already gone)
+	if err := os.Remove(rec.Path); err != nil && !os.IsNotExist(err) {
+		s.logger.Warn("failed to delete recording file", "id", id, "path", rec.Path, "error", err)
+	}
+
+	// Delete DB record
+	if err := s.recRepo.Delete(ctx, id); err != nil {
+		s.logger.Error("failed to delete recording from DB", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "recording deleted"})
 }
