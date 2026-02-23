@@ -29,7 +29,7 @@ export default function Settings() {
     <div className="p-8">
       <h1 className="text-2xl font-semibold mb-2">Settings</h1>
       <p className="text-muted mb-6">
-        System configuration (read-only in Phase 0)
+        System configuration (read-only — editing via UI is planned for Phase 9)
       </p>
 
       {error && (

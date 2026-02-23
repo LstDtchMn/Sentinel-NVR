@@ -14,7 +14,9 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// sendInterrupt sends SIGINT to the ffmpeg process for graceful segment finalization.
+// sendInterrupt sends SIGINT to the ffmpeg process group for graceful segment finalization.
+// Negative PID signals the entire process group (set by Setpgid: true in setSysProcAttr),
+// ensuring any child processes spawned by ffmpeg also receive the signal.
 func sendInterrupt(proc *os.Process, _ io.WriteCloser) error {
-	return proc.Signal(syscall.SIGINT)
+	return syscall.Kill(-proc.Pid, syscall.SIGINT)
 }

@@ -179,6 +179,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		started++
 		go func() {
 			defer m.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					pipeline.logger.Error("pipeline goroutine panic (recovered)", "panic", r)
+				}
+			}()
 			pipeline.Start()
 		}()
 	}
@@ -230,6 +235,11 @@ func (m *Manager) AddCamera(ctx context.Context, cam *CameraRecord) (*CameraWith
 
 		go func() {
 			defer m.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					pipeline.logger.Error("pipeline goroutine panic (recovered)", "panic", r)
+				}
+			}()
 			pipeline.Start()
 		}()
 
@@ -309,6 +319,11 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 
 			go func() {
 				defer m.wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						pipeline.logger.Error("pipeline goroutine panic (recovered)", "panic", r)
+					}
+				}()
 				pipeline.Start()
 			}()
 		}
@@ -360,10 +375,18 @@ func (m *Manager) RemoveCamera(ctx context.Context, name string) error {
 	// then crashed, the files would be orphaned permanently with no reference.
 	sanitized := SanitizeName(name)
 	recDir := filepath.Join(m.storageCfg.HotPath, sanitized)
-	if err := os.RemoveAll(recDir); err != nil {
-		m.logger.Warn("failed to remove recording directory", "path", recDir, "error", err)
-		// Non-fatal: proceed with DB deletion so the camera can be removed from the UI.
-		// Orphaned files can be cleaned up by a storage maintenance job.
+	// Containment check: verify the resolved path is strictly under the hot storage root
+	// before calling os.RemoveAll, which is irreversible and could delete unrelated files
+	// if the constructed path somehow escapes the storage boundary.
+	if isUnderPath(filepath.Clean(recDir), m.storageCfg.HotPath) {
+		if err := os.RemoveAll(recDir); err != nil {
+			m.logger.Warn("failed to remove recording directory", "path", recDir, "error", err)
+			// Non-fatal: proceed with DB deletion so the camera can be removed from the UI.
+			// Orphaned files can be cleaned up by a storage maintenance job.
+		}
+	} else {
+		m.logger.Error("recording directory escapes storage boundary, refusing to delete",
+			"path", recDir, "hot_path", m.storageCfg.HotPath)
 	}
 
 	// Delete from DB (cascades to recordings table via FK)
@@ -442,6 +465,17 @@ func (m *Manager) syncToGo2RTC(ctx context.Context, cam *CameraRecord) error {
 		}
 	}
 	return nil
+}
+
+// isUnderPath checks if cleanPath is strictly contained within basePath.
+// Returns false if cleanPath equals basePath (the storage root itself is not a valid target).
+func isUnderPath(cleanPath, basePath string) bool {
+	base := filepath.Clean(basePath)
+	rel, err := filepath.Rel(base, cleanPath)
+	if err != nil {
+		return false
+	}
+	return rel != "." && !strings.HasPrefix(rel, "..")
 }
 
 // removeFromGo2RTC removes a camera's streams from go2rtc.

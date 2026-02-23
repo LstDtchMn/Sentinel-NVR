@@ -8,6 +8,8 @@ export default {
         sentinel: {
           50: "#f0f4ff",
           100: "#dbe4ff",
+          300: "#a5b4fc",
+          400: "#818cf8",
           500: "#4c6ef5",
           600: "#3b5bdb",
           700: "#364fc7",

@@ -328,6 +328,9 @@ func (p *Pipeline) reregisterStreams() {
 				"error", err,
 				"stream", RedactStreamURL(p.cam.SubStream),
 			)
+			p.setStatus(func(s *PipelineStatus) {
+				s.LastError = fmt.Sprintf("sub stream registration failed: %v", err)
+			})
 			return
 		}
 	}

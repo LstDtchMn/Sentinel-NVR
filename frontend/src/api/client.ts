@@ -19,8 +19,7 @@ export type CameraState =
   | "streaming"
   | "recording"
   | "error"
-  | "stopped"
-  | "disconnected";
+  | "stopped";
 
 export interface HealthStatus {
   status: string;
@@ -42,7 +41,7 @@ export interface PipelineStatus {
   recording: boolean;
   detecting: boolean;
   last_error?: string;
-  connected_at?: string | null;
+  connected_at?: string;
 }
 
 /** Full camera detail returned by the API (DB record + pipeline status). */
@@ -71,6 +70,10 @@ export interface CameraInput {
   sub_stream?: string;
   record?: boolean;
   detect?: boolean;
+  onvif_host?: string;
+  onvif_port?: number;
+  onvif_user?: string;
+  onvif_pass?: string;
 }
 
 /** A single recording segment returned by the API. */
@@ -205,6 +208,10 @@ class ApiClient {
 
   getCamera(name: string, signal?: AbortSignal): Promise<CameraDetail> {
     return this.request<CameraDetail>(`/cameras/${encodeURIComponent(name)}`, { signal });
+  }
+
+  getCameraStatus(name: string, signal?: AbortSignal): Promise<PipelineStatus> {
+    return this.request<PipelineStatus>(`/cameras/${encodeURIComponent(name)}/status`, { signal });
   }
 
   createCamera(input: CameraInput, signal?: AbortSignal): Promise<CameraDetail> {

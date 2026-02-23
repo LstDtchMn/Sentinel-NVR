@@ -146,6 +146,7 @@ func (r *Recorder) Start() error {
 	// Wait for ffmpeg exit, then wait for I/O goroutines, then signal done
 	go func() {
 		err := cmd.Wait()
+		cancel() // always release context resources (prevents leak on graceful exit path)
 		r.mu.Lock()
 		wasActive := r.active
 		r.active = false
@@ -231,6 +232,21 @@ func (r *Recorder) readSegmentList(stdout io.Reader) {
 // processCompletedSegment handles a newly completed MP4 segment:
 // stats the file, inserts a DB record, and publishes an event.
 func (r *Recorder) processCompletedSegment(segPath string) {
+	// Normalize slashes: ffmpeg may output forward slashes even on Windows.
+	// Do this first so os.Stat, isUnderPath, and the DB record all use the
+	// canonical OS-specific separator.
+	segPath = filepath.Clean(filepath.FromSlash(segPath))
+
+	// Containment check: reject paths that escape the hot storage boundary before
+	// inserting into the DB. The serve/delete endpoints also check at read time,
+	// but early rejection prevents unresolvable DB records and defends against
+	// misconfiguration or unexpected ffmpeg output paths.
+	if !isUnderPath(segPath, r.hotPath) {
+		r.logger.Error("segment path escapes hot storage boundary, refusing to record",
+			"path", segPath, "hot_path", r.hotPath)
+		return
+	}
+
 	info, err := os.Stat(segPath)
 	if err != nil {
 		r.logger.Warn("could not stat completed segment", "path", segPath, "error", err)
@@ -243,7 +259,11 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 		return
 	}
 
-	// Parse start time from the segment filename (e.g., "10.00.mp4" → minute 10, second 0)
+	// Parse start time from the segment filename (e.g., "10.00.mp4" → minute 10, second 0).
+	// endTime and durationS are estimated from the configured segment duration, not measured
+	// from the file. The first segment after recorder start is clock-aligned and may be shorter
+	// than segmentDuration; the last segment at shutdown is also short. Phase 4 (Playback)
+	// should refine these values using ffprobe or the next segment's start time.
 	startTime := r.parseSegmentTime(segPath)
 	endTime := startTime.Add(time.Duration(r.segmentDuration) * time.Minute)
 	durationS := float64(r.segmentDuration * 60)
@@ -292,6 +312,10 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 // Path format: {hot_path}/{cam_name}/{YYYY-MM-DD}/{HH}/{MM.SS}.mp4
 // Falls back to file modification time if parsing fails.
 func (r *Recorder) parseSegmentTime(segPath string) time.Time {
+	// ffmpeg may output forward slashes even on Windows; normalize to OS separators
+	// so filepath.Dir/Base work correctly on all platforms.
+	segPath = filepath.FromSlash(segPath)
+
 	// Extract components from path
 	dir := filepath.Dir(segPath)           // .../2025-01-15/08
 	hourDir := filepath.Base(dir)          // "08"
@@ -368,7 +392,7 @@ func (r *Recorder) buildFFmpegArgs() []string {
 		// Input: go2rtc RTSP re-stream (TCP transport for reliability)
 		"-rtsp_transport", "tcp",
 		"-stimeout", "10000000", // 10s RTSP socket timeout in microseconds (ffmpeg RTSP demuxer option)
-		"-i", fmt.Sprintf("%s/%s", r.rtspBase, r.cam.Name),
+		"-i", fmt.Sprintf("%s/%s", strings.TrimRight(r.rtspBase, "/"), r.cam.Name),
 		// Output: copy streams (zero transcoding)
 		"-c", "copy",
 		// Segment muxer configuration

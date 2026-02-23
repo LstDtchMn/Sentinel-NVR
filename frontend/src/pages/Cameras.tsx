@@ -11,7 +11,6 @@ const STATUS_COLORS: Record<CameraState, string> = {
   recording: "text-blue-400",    // distinct from streaming — actively writing to disk
   connecting: "text-yellow-400",
   error: "text-red-400",
-  disconnected: "text-faint",
   idle: "text-faint",
   stopped: "text-faint",
 };

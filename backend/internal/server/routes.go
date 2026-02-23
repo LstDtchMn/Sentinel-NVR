@@ -451,7 +451,7 @@ func (s *Server) handlePlayRecording(c *gin.Context) {
 		}
 		return
 	}
-	if !isUnderPath(resolvedPath, s.cfg.Storage.HotPath) && !isUnderPath(resolvedPath, s.cfg.Storage.ColdPath) {
+	if !isUnderPath(resolvedPath, s.resolvedHotPath) && !isUnderPath(resolvedPath, s.resolvedColdPath) {
 		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path, "resolved", resolvedPath)
 		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		return
@@ -492,11 +492,31 @@ func (s *Server) handleDeleteRecording(c *gin.Context) {
 		return
 	}
 
-	// Validate path before deletion (lexical check — symlink check done per file below).
+	// Resolve symlinks BEFORE any mutation (DB delete) so a symlink-based path escape
+	// is caught before the DB row is irreversibly removed. If the file doesn't exist on
+	// disk, fall back to a lexical check — we still want to clean up the DB record.
 	cleanPath := filepath.Clean(rec.Path)
-	if !isUnderPath(cleanPath, s.cfg.Storage.HotPath) && !isUnderPath(cleanPath, s.cfg.Storage.ColdPath) {
-		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path)
-		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+	var resolvedPath string
+	var fileExists bool
+	resolved, err := filepath.EvalSymlinks(cleanPath)
+	if err == nil {
+		resolvedPath = resolved
+		fileExists = true
+		if !isUnderPath(resolvedPath, s.resolvedHotPath) && !isUnderPath(resolvedPath, s.resolvedColdPath) {
+			s.logger.Warn("resolved recording path escapes storage boundary", "id", id, "path", rec.Path, "resolved", resolvedPath)
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+			return
+		}
+	} else if os.IsNotExist(err) {
+		// File already gone — lexical check on the raw path before allowing DB cleanup.
+		if !isUnderPath(cleanPath, s.resolvedHotPath) && !isUnderPath(cleanPath, s.resolvedColdPath) {
+			s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path)
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+			return
+		}
+	} else {
+		s.logger.Error("failed to resolve recording path", "id", id, "path", rec.Path, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
@@ -513,27 +533,18 @@ func (s *Server) handleDeleteRecording(c *gin.Context) {
 		return
 	}
 
-	// Resolve symlinks before file deletion to prevent symlink-based path escapes.
-	// If the file is already gone, that's fine — the DB row was the critical state.
-	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
-	if err == nil {
-		// File exists — verify resolved path is also under storage before deleting.
-		if isUnderPath(resolvedPath, s.cfg.Storage.HotPath) || isUnderPath(resolvedPath, s.cfg.Storage.ColdPath) {
-			if err := os.Remove(resolvedPath); err != nil && !os.IsNotExist(err) {
-				s.logger.Warn("failed to delete recording file", "id", id, "path", resolvedPath, "error", err)
-			}
-		} else {
-			s.logger.Warn("resolved recording path escapes storage boundary (symlink), file not deleted",
-				"id", id, "path", rec.Path, "resolved", resolvedPath)
+	// Delete the file from disk (containment already verified above).
+	if fileExists {
+		if err := os.Remove(resolvedPath); err != nil && !os.IsNotExist(err) {
+			s.logger.Warn("failed to delete recording file", "id", id, "path", resolvedPath, "error", err)
 		}
-	} else if !os.IsNotExist(err) {
-		s.logger.Warn("could not resolve recording path for file deletion", "id", id, "path", cleanPath, "error", err)
 	}
 
 	c.Status(http.StatusNoContent)
 }
 
-// isUnderPath checks if cleanPath is contained within basePath.
+// isUnderPath checks if cleanPath is strictly contained within basePath.
+// Returns false if cleanPath equals basePath (the storage root itself is not a valid target).
 // Uses filepath.Rel for platform-safe path containment checking.
 func isUnderPath(cleanPath, basePath string) bool {
 	base := filepath.Clean(basePath)
@@ -541,5 +552,5 @@ func isUnderPath(cleanPath, basePath string) bool {
 	if err != nil {
 		return false
 	}
-	return !strings.HasPrefix(rel, "..")
+	return rel != "." && !strings.HasPrefix(rel, "..")
 }

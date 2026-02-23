@@ -106,13 +106,28 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the configuration for logical errors that would cause
 // runtime failures. Call after Load and setDefaults.
+// validLogLevels lists accepted values for server.log_level.
+// Must match slog.Level constants used in main.go to configure the logger.
+var validLogLevels = map[string]bool{
+	"debug": true,
+	"info":  true,
+	"warn":  true,
+	"error": true,
+}
+
 func Validate(cfg *Config) error {
 	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port %d is out of range [1-65535]", cfg.Server.Port)
 	}
+	if !validLogLevels[cfg.Server.LogLevel] {
+		return fmt.Errorf("server.log_level %q is invalid (must be debug, info, warn, or error)", cfg.Server.LogLevel)
+	}
 
 	if cfg.Storage.SegmentDuration < 1 {
 		return fmt.Errorf("storage.segment_duration must be >= 1, got %d", cfg.Storage.SegmentDuration)
+	}
+	if cfg.Storage.SegmentDuration > 60 {
+		return fmt.Errorf("storage.segment_duration %d exceeds maximum (60 minutes)", cfg.Storage.SegmentDuration)
 	}
 
 	if !filepath.IsAbs(cfg.Storage.HotPath) {

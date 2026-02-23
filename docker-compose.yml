@@ -105,9 +105,9 @@ services:
     profiles: ["dev"]
     restart: unless-stopped
     ports:
-      - "8554:8554"   # RTSP
-      - "1935:1935"   # RTMP
-      - "8888:8888"   # HLS
+      - "127.0.0.1:8554:8554"   # RTSP (localhost only — dev tool)
+      - "127.0.0.1:1935:1935"   # RTMP (localhost only — dev tool)
+      - "127.0.0.1:8888:8888"   # HLS  (localhost only — dev tool)
     environment:
       - MTX_PROTOCOLS=tcp
     logging:
