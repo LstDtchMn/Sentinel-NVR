@@ -32,13 +32,25 @@ func Open(dbPath string, walMode bool, logger *slog.Logger) (*sql.DB, error) {
 		"PRAGMA busy_timeout = 5000", // retry for 5s on SQLITE_BUSY
 		"PRAGMA foreign_keys = ON",
 	}
-	if walMode {
-		pragmas = append(pragmas, "PRAGMA journal_mode = WAL")
-	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("setting pragma %q: %w", p, err)
+		}
+	}
+
+	// WAL mode is set separately because the PRAGMA returns the actual journal mode
+	// that was applied (e.g. "wal" or "delete"). On network filesystems or read-only
+	// directories, WAL mode may silently fall back to DELETE journaling.
+	if walMode {
+		var journalMode string
+		if err := db.QueryRow("PRAGMA journal_mode = WAL").Scan(&journalMode); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("setting WAL mode: %w", err)
+		}
+		if journalMode != "wal" {
+			logger.Warn("WAL mode not available, falling back to default journal mode",
+				"requested", "wal", "actual", journalMode)
 		}
 	}
 

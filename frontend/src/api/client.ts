@@ -21,6 +21,13 @@ export type CameraState =
   | "error"
   | "stopped";
 
+/** Authenticated user info returned by GET /auth/me (Phase 7, CG6). */
+export interface AuthUser {
+  id: number;
+  username: string;
+  role: string;
+}
+
 export interface HealthStatus {
   status: string;
   version: string;
@@ -59,7 +66,7 @@ export interface CameraDetail {
   // onvif_pass is excluded from API responses (json:"-" on backend)
   created_at: string;
   updated_at: string;
-  pipeline_status: PipelineStatus;
+  pipeline_status: PipelineStatus | null;
 }
 
 /** Request body for creating/updating a camera. */
@@ -96,6 +103,103 @@ export interface RecordingListParams {
   end?: string;   // RFC3339
   limit?: number;
   offset?: number;
+}
+
+/** A recording segment projected for timeline rendering — no path field (R6). */
+export interface TimelineSegment {
+  id: number;
+  start_time: string; // RFC3339
+  end_time: string;   // RFC3339
+  duration_s: number;
+}
+
+/** A normalized bounding box from a detection event (coordinates in [0.0, 1.0]). */
+export interface BBox {
+  x_min: number;
+  y_min: number;
+  x_max: number;
+  y_max: number;
+}
+
+/** A single object detected in a frame. */
+export interface DetectedObject {
+  label: string;
+  confidence: number;
+  bbox: BBox;
+}
+
+/** A single row from the events table (Phase 5, R3). */
+export interface EventRecord {
+  id: number;
+  camera_id: number | null;
+  type: string;
+  label: string;
+  confidence: number;
+  /** Raw JSON string — parse to DetectedObject[] for detection events. */
+  data: string;
+  thumbnail: string; // empty when no snapshot was saved
+  has_clip: boolean;
+  start_time: string; // RFC3339
+  end_time: string | null;
+  created_at: string;
+}
+
+export interface EventsResponse {
+  events: EventRecord[];
+  total: number;
+}
+
+export interface EventListParams {
+  camera_id?: number;
+  type?: string;
+  date?: string; // YYYY-MM-DD
+  limit?: number;
+  offset?: number;
+}
+
+/** A 5-minute detection density bucket for timeline heatmap overlay (Phase 6, R6). */
+export interface HeatmapBucket {
+  bucket_start: string; // RFC3339 — start of the 5-minute window
+  detection_count: number;
+}
+
+// --- Notification types (Phase 8, R9) ---
+
+/** A registered device token for push delivery (FCM, APNs, or webhook). */
+export interface NotifToken {
+  id: number;
+  user_id: number;
+  token: string;
+  provider: "fcm" | "apns" | "webhook";
+  label: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A per-user notification preference controlling when alerts fire. */
+export interface NotifPref {
+  id: number;
+  user_id: number;
+  event_type: string; // "detection" | "camera.offline" | "*" (any)
+  camera_id: number | null; // null = all cameras
+  enabled: boolean;
+  critical: boolean; // true = iOS Critical Alert (bypasses Do Not Disturb)
+}
+
+/** A single notification delivery attempt recorded in notification_log. */
+export interface NotifLogEntry {
+  id: number;
+  event_id: number | null;
+  token_id: number;
+  provider: string;
+  title: string;
+  body: string;
+  deep_link: string;
+  status: "pending" | "sent" | "failed";
+  attempts: number;
+  last_error: string;
+  scheduled_at: string;
+  sent_at: string | null;
 }
 
 export interface SystemConfig {
@@ -173,6 +277,10 @@ class ApiClient {
       const response = await fetch(`${API_BASE}${path}`, {
         ...options,
         signal,
+        // credentials: "include" sends httpOnly cookies cross-origin in development
+        // (Vite dev server proxies /api/v1 to localhost:8099, but the origin header
+        // from localhost:5173 still requires the server to allow credentials).
+        credentials: "include",
       });
 
       if (!response.ok) {
@@ -184,7 +292,9 @@ class ApiClient {
         } catch {
           // response wasn't JSON — use statusText
         }
-        throw new Error(`API error ${response.status}: ${detail}`);
+        const err = new Error(`API error ${response.status}: ${detail}`) as Error & { status?: number };
+        err.status = response.status;
+        throw err;
       }
 
       // 204 No Content has an empty body — return undefined rather than attempting
@@ -262,9 +372,155 @@ class ApiClient {
     await this.request(`/recordings/${id}`, { method: "DELETE", signal });
   }
 
+  /** Returns segments for a camera on a given day, for timeline rendering (R6). */
+  getTimeline(params: { camera: string; date: string }, signal?: AbortSignal): Promise<TimelineSegment[]> {
+    const query = new URLSearchParams();
+    query.set("camera", params.camera);
+    query.set("date", params.date);
+    return this.request<TimelineSegment[]>(`/recordings/timeline?${query}`, { signal });
+  }
+
+  /** Returns dates with recordings for a camera in a given month (R6). */
+  getRecordingDays(params: { camera: string; month: string }, signal?: AbortSignal): Promise<string[]> {
+    const query = new URLSearchParams();
+    query.set("camera", params.camera);
+    query.set("month", params.month);
+    return this.request<string[]>(`/recordings/days?${query}`, { signal });
+  }
+
   /** Returns the URL for streaming/downloading a recording segment. */
   recordingPlayURL(id: number): string {
     return `${API_BASE}/recordings/${id}/play`;
+  }
+
+  /** Returns detection events with optional filtering and pagination (Phase 5, R3). */
+  getEvents(params?: EventListParams, signal?: AbortSignal): Promise<EventsResponse> {
+    const query = new URLSearchParams();
+    if (params?.camera_id !== undefined) query.set("camera_id", String(params.camera_id));
+    if (params?.type) query.set("type", params.type);
+    if (params?.date) query.set("date", params.date);
+    if (params?.limit !== undefined) query.set("limit", String(params.limit));
+    if (params?.offset !== undefined) query.set("offset", String(params.offset));
+    const qs = query.toString();
+    return this.request<EventsResponse>(`/events${qs ? `?${qs}` : ""}`, { signal });
+  }
+
+  /** Returns the URL for serving an event thumbnail JPEG. */
+  eventThumbnailURL(id: number): string {
+    return `${API_BASE}/events/${id}/thumbnail`;
+  }
+
+  getEvent(id: number, signal?: AbortSignal): Promise<EventRecord> {
+    return this.request<EventRecord>(`/events/${id}`, { signal });
+  }
+
+  async deleteEvent(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/events/${id}`, { method: "DELETE", signal });
+  }
+
+  /** Returns detection density buckets for the timeline heatmap overlay (Phase 6, R6). */
+  getEventHeatmap(params: { camera_id: number; date: string }, signal?: AbortSignal): Promise<HeatmapBucket[]> {
+    const query = new URLSearchParams();
+    query.set("camera_id", String(params.camera_id));
+    query.set("date", params.date);
+    return this.request<HeatmapBucket[]>(`/events/heatmap?${query}`, { signal });
+  }
+
+  // --- Auth (Phase 7, CG6) ---
+
+  /** Logs in and sets httpOnly cookies. Throws on invalid credentials (401). */
+  login(username: string, password: string, signal?: AbortSignal): Promise<void> {
+    return this.request<void>("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+      signal,
+    });
+  }
+
+  /** Rotates the refresh token and reissues cookies. Throws 401 on expired session. */
+  refreshSession(signal?: AbortSignal): Promise<void> {
+    return this.request<void>("/auth/refresh", { method: "POST", signal });
+  }
+
+  /** Revokes the refresh token and clears auth cookies. */
+  logout(signal?: AbortSignal): Promise<void> {
+    return this.request<void>("/auth/logout", { method: "POST", signal });
+  }
+
+  /** Returns the currently authenticated user, or throws 401 if not logged in. */
+  getMe(signal?: AbortSignal): Promise<AuthUser> {
+    return this.request<AuthUser>("/auth/me", { signal });
+  }
+
+  /**
+   * Opens a Server-Sent Events connection to receive live event notifications (Phase 6, CG8).
+   * The caller must close the returned EventSource on component unmount:
+   *   const source = api.subscribeEvents();
+   *   return () => source.close();
+   */
+  subscribeEvents(): EventSource {
+    return new EventSource(`${API_BASE}/events/stream`, { withCredentials: true });
+  }
+
+  /** Returns the WebSocket URL for a camera's live MSE stream (CG3). */
+  streamWSURL(cameraName: string): string {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${location.host}${API_BASE}/streams/${encodeURIComponent(cameraName)}/ws`;
+  }
+
+  // --- Notifications (Phase 8, R9) ---
+
+  /** Registers (or updates the label of) a device token for push delivery. */
+  createNotifToken(
+    input: { provider: "fcm" | "apns" | "webhook"; token: string; label?: string },
+    signal?: AbortSignal,
+  ): Promise<NotifToken> {
+    return this.request<NotifToken>("/notifications/tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal,
+    });
+  }
+
+  /** Returns all device tokens registered for the current user. */
+  listNotifTokens(signal?: AbortSignal): Promise<NotifToken[]> {
+    return this.request<NotifToken[]>("/notifications/tokens", { signal });
+  }
+
+  /** Removes a registered device token. */
+  async deleteNotifToken(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/notifications/tokens/${id}`, { method: "DELETE", signal });
+  }
+
+  /** Returns the current user's notification preferences. */
+  listNotifPrefs(signal?: AbortSignal): Promise<NotifPref[]> {
+    return this.request<NotifPref[]>("/notifications/prefs", { signal });
+  }
+
+  /** Creates or updates a notification preference. */
+  upsertNotifPref(
+    input: { event_type: string; camera_id?: number | null; enabled: boolean; critical: boolean },
+    signal?: AbortSignal,
+  ): Promise<NotifPref> {
+    return this.request<NotifPref>("/notifications/prefs", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal,
+    });
+  }
+
+  /** Removes a notification preference by ID. */
+  async deleteNotifPref(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/notifications/prefs/${id}`, { method: "DELETE", signal });
+  }
+
+  /** Returns recent notification delivery log entries for the current user. */
+  listNotifLog(limit?: number, signal?: AbortSignal): Promise<NotifLogEntry[]> {
+    const qs = limit ? `?limit=${limit}` : "";
+    return this.request<NotifLogEntry[]>(`/notifications/log${qs}`, { signal });
   }
 }
 

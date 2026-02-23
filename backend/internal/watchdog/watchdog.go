@@ -71,8 +71,8 @@ func (w *Watchdog) Stop() {
 }
 
 func (w *Watchdog) check() {
-	// TODO: Phase 1b — Check camera pipeline health
-	// TODO: Phase 1b — Check disk space on hot/cold storage
-	// TODO: Phase 1b — Log "System Restart" events to database on recovery
+	// TODO: Phase 10 (Hardening) — Check camera pipeline health
+	// TODO: Phase 10 (Hardening) — Check disk space on hot/cold storage
+	// TODO: Phase 10 (Hardening) — Log "System Restart" events to database on recovery
 	w.logger.Debug("health check passed")
 }

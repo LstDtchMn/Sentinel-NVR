@@ -28,4 +28,4 @@ ALTER TABLE events_new RENAME TO events;
 
 CREATE INDEX IF NOT EXISTS idx_events_camera_time ON events(camera_id, start_time);
 
-CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);

@@ -35,12 +35,13 @@ type Recorder struct {
 	bus             *eventbus.Bus
 	logger          *slog.Logger
 
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	cancel context.CancelFunc
-	active bool
-	done   chan struct{} // closed when ffmpeg process + all I/O goroutines finish
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	cancel   context.CancelFunc
+	active   bool
+	stopping bool           // true between Stop() releasing the lock and ffmpeg exiting
+	done     chan struct{}   // closed when ffmpeg process + all I/O goroutines finish
 }
 
 // NewRecorder creates a recorder for a camera. Does not start ffmpeg.
@@ -70,7 +71,12 @@ func (r *Recorder) Start() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.active {
+	// Don't start while active or while a Stop() is in flight. Without the
+	// stopping guard, a health tick that sees active=false (set by Stop before
+	// ffmpeg exits) could call Start() which overwrites r.done, causing the
+	// old waiter goroutine to close the new channel — and the new waiter to
+	// double-close it → panic.
+	if r.active || r.stopping {
 		return nil // already running
 	}
 
@@ -143,6 +149,11 @@ func (r *Recorder) Start() error {
 		r.drainStderr(stderr)
 	}()
 
+	// Capture done locally — the waiter goroutine must close THIS channel, not
+	// r.done (which Start() may overwrite if called between Stop releasing the
+	// mutex and ffmpeg actually exiting).
+	done := r.done
+
 	// Wait for ffmpeg exit, then wait for I/O goroutines, then signal done
 	go func() {
 		err := cmd.Wait()
@@ -150,6 +161,9 @@ func (r *Recorder) Start() error {
 		r.mu.Lock()
 		wasActive := r.active
 		r.active = false
+		// Do NOT clear stopping here — I/O goroutines (readSegmentList, drainStderr)
+		// are still running. Clearing stopping before they finish would allow a
+		// concurrent Start() to launch new I/O goroutines while old ones are active.
 		r.mu.Unlock()
 
 		if wasActive {
@@ -163,8 +177,14 @@ func (r *Recorder) Start() error {
 			Label:    r.cam.Name,
 		})
 
-		ioWg.Wait()
-		close(r.done)
+		ioWg.Wait() // wait for readSegmentList and drainStderr to exit
+
+		// NOW it is safe to allow Start() again — ffmpeg and all I/O are fully done.
+		r.mu.Lock()
+		r.stopping = false
+		r.mu.Unlock()
+
+		close(done) // close the captured channel, not r.done
 	}()
 
 	return nil
@@ -184,6 +204,7 @@ func (r *Recorder) Stop() {
 	needsSignal := r.active
 	if needsSignal {
 		r.active = false
+		r.stopping = true // prevents Start() until the waiter goroutine clears it
 	}
 	cmd := r.cmd
 	stdin := r.stdin
@@ -191,8 +212,11 @@ func (r *Recorder) Stop() {
 	r.mu.Unlock()
 
 	if needsSignal && cmd != nil && cmd.Process != nil {
-		// Send interrupt for graceful shutdown (ffmpeg finalizes the current segment)
-		_ = sendInterrupt(cmd.Process, stdin)
+		// Send interrupt for graceful shutdown (ffmpeg finalizes the current segment).
+		// Log at Debug so failures (e.g. process already dead, stdin closed) are diagnosable.
+		if err := sendInterrupt(cmd.Process, stdin); err != nil {
+			r.logger.Debug("ffmpeg interrupt signal failed", "error", err)
+		}
 
 		// Wait up to 5 seconds for ffmpeg to exit gracefully
 		select {
@@ -226,6 +250,13 @@ func (r *Recorder) readSegmentList(stdout io.Reader) {
 		}
 
 		r.processCompletedSegment(segPath)
+	}
+	// Check for pipe errors after the scan loop. Without this, a broken stdout
+	// pipe (e.g. bufio.ErrTooLong on an unexpectedly long path) causes silent
+	// data loss — ffmpeg keeps recording but no segments are inserted into the DB.
+	if err := scanner.Err(); err != nil {
+		r.logger.Error("segment list read error — segments may not be recorded to DB",
+			"camera", r.cam.Name, "error", err)
 	}
 }
 
@@ -264,7 +295,8 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 	// from the file. The first segment after recorder start is clock-aligned and may be shorter
 	// than segmentDuration; the last segment at shutdown is also short. Phase 4 (Playback)
 	// should refine these values using ffprobe or the next segment's start time.
-	startTime := r.parseSegmentTime(segPath)
+	// Pass info.ModTime() so parseSegmentTime doesn't need a second os.Stat call.
+	startTime := r.parseSegmentTime(segPath, info.ModTime())
 	endTime := startTime.Add(time.Duration(r.segmentDuration) * time.Minute)
 	durationS := float64(r.segmentDuration * 60)
 
@@ -310,17 +342,18 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 
 // parseSegmentTime extracts the timestamp from a segment path.
 // Path format: {hot_path}/{cam_name}/{YYYY-MM-DD}/{HH}/{MM.SS}.mp4
-// Falls back to file modification time if parsing fails.
-func (r *Recorder) parseSegmentTime(segPath string) time.Time {
+// modTime is the file modification time from the caller's os.Stat — passed in
+// to avoid a redundant second stat call when path parsing fails.
+func (r *Recorder) parseSegmentTime(segPath string, modTime time.Time) time.Time {
 	// ffmpeg may output forward slashes even on Windows; normalize to OS separators
 	// so filepath.Dir/Base work correctly on all platforms.
 	segPath = filepath.FromSlash(segPath)
 
 	// Extract components from path
-	dir := filepath.Dir(segPath)           // .../2025-01-15/08
-	hourDir := filepath.Base(dir)          // "08"
+	dir := filepath.Dir(segPath)                // .../2025-01-15/08
+	hourDir := filepath.Base(dir)               // "08"
 	dateDir := filepath.Base(filepath.Dir(dir)) // "2025-01-15"
-	base := filepath.Base(segPath)         // "10.00.mp4"
+	base := filepath.Base(segPath)              // "10.00.mp4"
 	minSec := strings.TrimSuffix(base, filepath.Ext(base)) // "10.00"
 
 	// Parse "YYYY-MM-DD HH:MM:SS" using the local timezone.
@@ -329,10 +362,14 @@ func (r *Recorder) parseSegmentTime(segPath string) time.Time {
 	timeStr := fmt.Sprintf("%s %s:%s", dateDir, hourDir, strings.Replace(minSec, ".", ":", 1))
 	t, err := time.ParseInLocation("2006-01-02 15:04:05", timeStr, time.Local)
 	if err != nil {
-		// Fallback: use current time minus segment duration
-		r.logger.Warn("could not parse segment time from path, using estimate",
+		// Fallback: use file modification time minus the configured segment duration as
+		// an approximate start time. The mtime is the segment close time; subtracting
+		// segment duration is a rough estimate only — it is wrong for the first short
+		// segment after recorder start and the last segment at shutdown. Still better
+		// than time.Now() which has no relationship to the actual recording time.
+		r.logger.Warn("could not parse segment time from path, using estimate from file mtime",
 			"path", segPath, "parsed_str", timeStr, "error", err)
-		return time.Now().Add(-time.Duration(r.segmentDuration) * time.Minute)
+		return modTime.Add(-time.Duration(r.segmentDuration) * time.Minute)
 	}
 	return t
 }

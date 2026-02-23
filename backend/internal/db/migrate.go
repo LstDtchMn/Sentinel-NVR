@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -55,66 +56,80 @@ func runMigrations(db *sql.DB, logger *slog.Logger) error {
 			continue
 		}
 
-		// Check if already applied
-		var count int
-		err = db.QueryRow("SELECT COUNT(*) FROM _migrations WHERE version = ?", version).Scan(&count)
-		if err != nil {
-			return fmt.Errorf("checking migration %d: %w", version, err)
+		if err := applyMigration(db, entry.Name(), version, logger); err != nil {
+			return err
 		}
-		if count > 0 {
-			continue
-		}
-
-		// Read migration file
-		content, err := migrationsFS.ReadFile("migrations/" + entry.Name())
-		if err != nil {
-			return fmt.Errorf("reading migration %s: %w", entry.Name(), err)
-		}
-
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("beginning transaction for migration %d: %w", version, err)
-		}
-
-		// Split by semicolons and execute each statement individually.
-		// This avoids partial execution if the driver only runs the first
-		// statement in a multi-statement Exec call.
-		//
-		// LIMITATION: This naive splitter will break on SQL containing semicolons
-		// inside string literals or trigger bodies (BEGIN...END;). If you need
-		// triggers or complex seed data, use the "--;;--" delimiter convention
-		// or switch to a migration library like golang-migrate.
-		for _, stmt := range strings.Split(string(content), ";") {
-			stmt = strings.TrimSpace(stmt)
-			if stmt == "" {
-				continue
-			}
-			if _, err := tx.Exec(stmt); err != nil {
-				if rbErr := tx.Rollback(); rbErr != nil {
-					logger.Warn("rollback failed after migration statement error",
-						"migration", entry.Name(), "rollback_error", rbErr)
-				}
-				return fmt.Errorf("executing statement in migration %s: %w\nstatement: %s", entry.Name(), err, stmt)
-			}
-		}
-
-		if _, err := tx.Exec(
-			"INSERT INTO _migrations (version, name) VALUES (?, ?)",
-			version, entry.Name(),
-		); err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				logger.Warn("rollback failed after recording migration version",
-					"migration", entry.Name(), "rollback_error", rbErr)
-			}
-			return fmt.Errorf("recording migration %s: %w", entry.Name(), err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("committing migration %s: %w", entry.Name(), err)
-		}
-
-		logger.Info("applied migration", "version", version, "name", entry.Name())
 	}
 
+	return nil
+}
+
+// applyMigration applies a single migration file within a transaction.
+// Extracted from the loop so the deferred rollback is correctly scoped to
+// each migration instead of accumulating defers at the outer function level.
+func applyMigration(db *sql.DB, filename string, version int, logger *slog.Logger) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction for migration %d: %w", version, err)
+	}
+	// Log rollback errors other than the expected "tx already done" after a
+	// successful Commit. A failed rollback leaves the transaction open, which
+	// would block the single-connection pool permanently.
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			logger.Warn("rollback failed for migration", "migration", filename, "error", rbErr)
+		}
+	}()
+
+	// Check if already applied inside the transaction so the check and the
+	// subsequent INSERT are atomic — prevents double-application if two
+	// processes start simultaneously.
+	var count int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM _migrations WHERE version = ?", version).Scan(&count); err != nil {
+		return fmt.Errorf("checking migration %d: %w", version, err)
+	}
+	if count > 0 {
+		// Already applied — returning nil causes the defer to call tx.Rollback(),
+		// which is correct (no writes made; rolling back a read-only tx is safe).
+		return nil
+	}
+
+	// Read migration file only after confirming it needs to be applied — avoids
+	// unnecessary embedded FS I/O for already-applied migrations on every startup.
+	content, err := migrationsFS.ReadFile("migrations/" + filename)
+	if err != nil {
+		return fmt.Errorf("reading migration %s: %w", filename, err)
+	}
+
+	// Split by semicolons and execute each statement individually.
+	// This avoids partial execution if the driver only runs the first
+	// statement in a multi-statement Exec call.
+	//
+	// LIMITATION: This naive splitter will break on SQL containing semicolons
+	// inside string literals or trigger bodies (BEGIN...END;). If you need
+	// triggers or complex seed data, use the "--;;--" delimiter convention
+	// or switch to a migration library like golang-migrate.
+	for _, stmt := range strings.Split(string(content), ";") {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("executing statement in migration %s: %w\nstatement: %s", filename, err, stmt)
+		}
+	}
+
+	if _, err := tx.Exec(
+		"INSERT INTO _migrations (version, name) VALUES (?, ?)",
+		version, filename,
+	); err != nil {
+		return fmt.Errorf("recording migration %s: %w", filename, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing migration %s: %w", filename, err)
+	}
+
+	logger.Info("applied migration", "version", version, "name", filename)
 	return nil
 }

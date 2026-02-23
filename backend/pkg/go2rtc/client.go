@@ -99,7 +99,9 @@ func (c *Client) AddStream(ctx context.Context, name, src string) error {
 	}
 	defer drainAndClose(resp)
 
-	if resp.StatusCode != http.StatusOK {
+	// go2rtc returns 400 when the config file is read-only (e.g., mounted :ro
+	// in Docker). The stream IS registered in memory — treat 400 as success.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusBadRequest {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("go2rtc: add stream %q returned %d: %s", name, resp.StatusCode, body)
 	}
@@ -147,6 +149,39 @@ func (c *Client) Health(ctx context.Context) error {
 		return fmt.Errorf("go2rtc: health check returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// FrameJPEG fetches a single JPEG snapshot from a go2rtc stream via
+// /api/frame.jpeg?src=<streamName>. Returns the raw JPEG bytes.
+// Returns an error if the stream has no active producer (404) or
+// go2rtc is unreachable — callers should treat errors as transient.
+func (c *Client) FrameJPEG(ctx context.Context, streamName string) ([]byte, error) {
+	u := c.baseURL + "/api/frame.jpeg?" + url.Values{"src": {streamName}}.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("go2rtc: creating frame request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("go2rtc: fetching frame %q: %w", streamName, err)
+	}
+	defer drainAndClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("go2rtc: frame %q returned %d: %s", streamName, resp.StatusCode, body)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("go2rtc: reading frame %q: %w", streamName, err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("go2rtc: frame %q: empty response body (stream may have no active producer)", streamName)
+	}
+	return data, nil
 }
 
 // WaitReady polls Health() with exponential backoff until go2rtc is reachable

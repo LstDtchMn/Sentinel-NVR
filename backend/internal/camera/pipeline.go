@@ -7,9 +7,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/detection"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
@@ -41,18 +44,19 @@ type PipelineStatus struct {
 // Pipeline manages the full lifecycle of a single camera:
 //   - Monitors go2rtc stream health (producers present = stream active)
 //   - Manages ffmpeg recording subprocess when stream is active and cam.Record=true (CG4, CG9)
-//   - Phase 5 will add: Sub stream → AI detection pipeline
+//   - Manages AI detection pipeline when stream is active and cam.Detect=true (R3, Phase 5)
 type Pipeline struct {
-	cam       *CameraRecord
-	g2r       *go2rtc.Client
-	bus       *eventbus.Bus
-	recorder  *Recorder // nil if cam.Record is false
-	logger    *slog.Logger
-	ctx       context.Context    // cancelled by Stop() to unblock in-flight go2rtc calls
-	ctxCancel context.CancelFunc
-	stopCh    chan struct{}
-	stopOnce  sync.Once
-	startDone chan struct{} // closed when Start() returns; used to wait for full pipeline exit
+	cam         *CameraRecord
+	g2r         *go2rtc.Client
+	bus         *eventbus.Bus
+	recorder    *Recorder                   // nil if cam.Record is false
+	detPipeline *detection.DetectionPipeline // nil if cam.Detect is false or detection disabled
+	logger      *slog.Logger
+	ctx         context.Context    // cancelled by Stop() to unblock in-flight go2rtc calls
+	ctxCancel   context.CancelFunc
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	startDone   chan struct{} // closed when Start() returns; used to wait for full pipeline exit
 
 	// recordingStartFailed suppresses repeated error logs after first recorder.Start() failure.
 	// Only accessed from the Start() goroutine's health check loop; no mutex needed.
@@ -61,12 +65,19 @@ type Pipeline struct {
 	recordingStartFailed bool
 	recordingFailCount   int
 
+	// detStartFailed / detFailCount serve the same throttle purpose for detection.
+	detStartFailed bool
+	detFailCount   int
+
 	mu     sync.RWMutex
 	status PipelineStatus
 }
 
 // NewPipeline creates a pipeline for a single camera in idle state.
 // If the camera has recording enabled, a Recorder is created (but not started).
+// If the camera has detection enabled and a Detector is provided, a DetectionPipeline
+// is created (but not started) — it will be started by checkStreamHealth when
+// the stream becomes active.
 func NewPipeline(
 	cam *CameraRecord,
 	g2r *go2rtc.Client,
@@ -74,6 +85,8 @@ func NewPipeline(
 	hotPath string,
 	segmentDuration int,
 	recRepo *recording.Repository,
+	detector detection.Detector, // nil if detection is disabled globally
+	detCfg config.DetectionConfig,
 	bus *eventbus.Bus,
 	logger *slog.Logger,
 ) *Pipeline {
@@ -92,6 +105,28 @@ func NewPipeline(
 
 	if cam.Record {
 		p.recorder = NewRecorder(cam, rtspBase, hotPath, segmentDuration, recRepo, bus, logger)
+	}
+
+	// Create detection pipeline when the camera has detect=true AND a global detector
+	// has been configured. The sub stream is preferred (lower resolution → faster inference);
+	// falls back to the main stream when no sub stream is configured.
+	if cam.Detect && detector != nil {
+		streamName := cam.Name
+		if cam.SubStream != "" {
+			streamName = cam.Name + "_sub"
+		}
+		snapshotDir := filepath.Join(detCfg.SnapshotPath, SanitizeName(cam.Name))
+		p.detPipeline = detection.NewDetectionPipeline(
+			detection.CameraInfo{ID: cam.ID, Name: cam.Name},
+			streamName,
+			g2r,
+			detector,
+			snapshotDir,
+			detCfg.ConfidenceThresholdValue(),
+			time.Duration(detCfg.FrameInterval)*time.Second,
+			bus,
+			logger,
+		)
 	}
 
 	return p
@@ -120,9 +155,14 @@ func (p *Pipeline) Start() {
 		case <-ticker.C:
 			p.checkStreamHealth()
 		case <-p.stopCh:
-			// Stop recording before setting final state
+			// Stop recording and detection before setting final state.
+			// Detection Stop() blocks until the goroutine exits (bounded by 10s ctx
+			// timeout on the in-flight processFrame call) — acceptable for shutdown.
 			if p.recorder != nil && p.recorder.IsActive() {
 				p.recorder.Stop()
+			}
+			if p.detPipeline != nil && p.detPipeline.IsActive() {
+				p.detPipeline.Stop()
 			}
 			p.setStatus(func(s *PipelineStatus) {
 				s.State = StateStopped
@@ -153,11 +193,19 @@ func (p *Pipeline) checkStreamHealth() {
 		})
 		p.logger.Warn("go2rtc unreachable", "error", err)
 
-		// Stop recording if go2rtc is unreachable
+		// Stop recording and detection if go2rtc is unreachable.
 		if p.recorder != nil && p.recorder.IsActive() {
 			p.recorder.Stop()
 			p.setStatus(func(s *PipelineStatus) {
 				s.Recording = false
+			})
+		}
+		if p.detPipeline != nil && p.detPipeline.IsActive() {
+			p.detPipeline.Stop()
+			p.detStartFailed = false
+			p.detFailCount = 0
+			p.setStatus(func(s *PipelineStatus) {
+				s.Detecting = false
 			})
 		}
 		return
@@ -178,6 +226,8 @@ func (p *Pipeline) checkStreamHealth() {
 	var needsResync bool
 	var needsStartRecording bool
 	var needsStopRecording bool
+	var needsStartDetection bool
+	var needsStopDetection bool
 	var publishConnected bool
 	var publishDisconnected bool
 
@@ -209,6 +259,21 @@ func (p *Pipeline) checkStreamHealth() {
 			} else {
 				s.State = StateStreaming
 			}
+
+			// Decide detection state (independent of recording state).
+			// Use s.Detecting (the authoritative status field, under the mutex) rather than
+			// IsActive() (which has a TOCTOU window between Start() return and goroutine
+			// scheduling). Only start detection if the stream the pipeline actually reads
+			// from is active — when a sub-stream is configured, detection runs off the
+			// sub-stream; starting when only the main is active would cause persistent
+			// FrameJPEG errors against an offline sub-stream.
+			detStreamActive := mainActive
+			if p.cam.SubStream != "" {
+				detStreamActive = subActive
+			}
+			if p.detPipeline != nil && !s.Detecting && detStreamActive {
+				needsStartDetection = true
+			}
 		} else if mainExists && mainInfo != nil {
 			// Stream is registered but has no producer — camera disconnected
 			if s.State == StateStreaming || s.State == StateRecording {
@@ -220,6 +285,10 @@ func (p *Pipeline) checkStreamHealth() {
 			if recorderActive {
 				needsStopRecording = true
 				s.Recording = false
+			}
+			if s.Detecting {
+				needsStopDetection = true
+				s.Detecting = false
 			}
 		} else {
 			// Stream not registered in go2rtc — needs re-sync (go2rtc restart recovery)
@@ -233,6 +302,10 @@ func (p *Pipeline) checkStreamHealth() {
 			if recorderActive {
 				needsStopRecording = true
 				s.Recording = false
+			}
+			if s.Detecting {
+				needsStopDetection = true
+				s.Detecting = false
 			}
 		}
 	})
@@ -257,12 +330,18 @@ func (p *Pipeline) checkStreamHealth() {
 		})
 	}
 
-	// Stop recording first if needed (before re-sync or other actions)
+	// Stop recording and detection first if needed (before re-sync or other actions).
 	if needsStopRecording && p.recorder != nil {
 		p.recorder.Stop()
 		p.recordingStartFailed = false // reset so the next start attempt is logged fresh
 		p.recordingFailCount = 0
 		p.logger.Info("recording stopped (stream lost)")
+	}
+	if needsStopDetection && p.detPipeline != nil {
+		p.detPipeline.Stop()
+		p.detStartFailed = false
+		p.detFailCount = 0
+		p.logger.Info("detection stopped (stream lost)")
 	}
 
 	// Auto-recovery: re-register streams in go2rtc after a restart.
@@ -283,6 +362,11 @@ func (p *Pipeline) checkStreamHealth() {
 				p.recordingStartFailed = true
 			}
 			p.setStatus(func(s *PipelineStatus) {
+				// Set state to Error so the API reflects an inconsistent condition
+				// rather than showing state=streaming with a non-empty last_error.
+				// The next health tick will retry recording start, resetting state
+				// to Recording if it succeeds.
+				s.State = StateError
 				s.LastError = fmt.Sprintf("recording failed: %v", err)
 			})
 		} else {
@@ -294,6 +378,21 @@ func (p *Pipeline) checkStreamHealth() {
 			})
 			p.logger.Info("recording started")
 		}
+	}
+
+	// Start detection pipeline if stream is active and detector is not running.
+	// Unlike Recorder.Start() (which launches ffmpeg), DetectionPipeline.Start()
+	// is pure Go and never returns an error — retry throttling is inside the pipeline
+	// itself (processFrame failCount). We still track detStartFailed for consistency
+	// if the pattern changes, but it is not currently set.
+	if needsStartDetection && p.detPipeline != nil {
+		p.detPipeline.Start()
+		p.detStartFailed = false
+		p.detFailCount = 0
+		p.setStatus(func(s *PipelineStatus) {
+			s.Detecting = true
+		})
+		p.logger.Info("detection started")
 	}
 
 	// Periodically ensure next hour's directory exists (runs every health check = 5s, cheap no-op)

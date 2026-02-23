@@ -33,7 +33,7 @@ type ProbeResult struct {
 
 // Probe queries stream metadata without starting a full decode.
 func Probe(ctx context.Context, streamURL string) (*ProbeResult, error) {
-	// TODO: Phase 1b — implement ffprobe -v quiet -print_format json -show_streams <url>
+	// TODO: Phase 4 (Playback) — implement ffprobe -v quiet -print_format json -show_streams <url>
 	return nil, fmt.Errorf("not yet implemented")
 }
 

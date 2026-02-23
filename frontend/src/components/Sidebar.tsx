@@ -1,20 +1,27 @@
 /**
  * Sidebar — persistent navigation sidebar (CG11).
- * Shows app logo, nav links, and version fetched from the API.
+ * Phase 7: shows logged-in username and logout button at the bottom (CG6).
  */
 import { useEffect, useState } from "react";
-import { NavLink } from "react-router-dom";
-import { LayoutDashboard, Camera, Settings, Shield } from "lucide-react";
+import { NavLink, useNavigate } from "react-router-dom";
+import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut } from "lucide-react";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 
 const navItems = [
+  { to: "/live", label: "Live View", icon: Video },
+  { to: "/playback", label: "Playback", icon: Clock },
+  { to: "/events", label: "Events", icon: Activity },
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/cameras", label: "Cameras", icon: Camera },
+  { to: "/notifications", label: "Notifications", icon: Bell },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
 export default function Sidebar() {
   const [version, setVersion] = useState<string>("");
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -24,6 +31,11 @@ export default function Sidebar() {
       .catch(() => {});
     return () => controller.abort();
   }, []);
+
+  async function handleLogout() {
+    await logout();
+    navigate("/login", { replace: true });
+  }
 
   return (
     <aside className="w-64 bg-surface-raised border-r border-border flex flex-col">
@@ -53,9 +65,29 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Footer — version sourced from /api/v1/health */}
-      <div className="px-6 py-4 border-t border-border text-xs text-faint">
-        Sentinel NVR {version ? `v${version}` : ""}
+      {/* Footer — username + logout + version */}
+      <div className="border-t border-border">
+        {user && (
+          <div className="px-4 py-3 flex items-center justify-between">
+            <span className="text-xs text-muted truncate max-w-[120px]" title={user.username}>
+              {user.username}
+              {user.role === "admin" && (
+                <span className="ml-1.5 text-[10px] text-sentinel-500 font-medium">admin</span>
+              )}
+            </span>
+            <button
+              onClick={handleLogout}
+              title="Sign out"
+              className="p-1.5 rounded-md text-muted hover:text-status-error hover:bg-surface-overlay
+                         transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+        <div className="px-6 pb-4 text-xs text-faint">
+          Sentinel NVR {version ? `v${version}` : ""}
+        </div>
       </div>
     </aside>
   );

@@ -32,8 +32,8 @@ func (m *Manager) Start() error {
 		"cold_retention_days", m.cfg.ColdRetentionDays,
 	)
 
-	// TODO: Phase 1b — Ensure directories exist
-	// TODO: Phase 1b — Start background worker for hot→cold migration
-	// TODO: Phase 1b — Start background worker for cold retention cleanup
+	// TODO: Phase 10 (Hardening) — Ensure directories exist
+	// TODO: Phase 10 (Hardening) — Start background worker for hot→cold migration
+	// TODO: Phase 10 (Hardening) — Start background worker for cold retention cleanup
 	return nil
 }

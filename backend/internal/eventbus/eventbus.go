@@ -14,6 +14,7 @@ type Event struct {
 	CameraID   int       `json:"camera_id,omitempty"`
 	Label      string    `json:"label,omitempty"`
 	Confidence float64   `json:"confidence,omitempty"` // 0.0–1.0 for detection events
+	Thumbnail  string    `json:"thumbnail,omitempty"`  // Phase 5: absolute path to snapshot JPEG
 	Data       any       `json:"data,omitempty"`       // Arbitrary payload (bounding boxes, metadata, etc.)
 	Timestamp  time.Time `json:"timestamp"`
 }
@@ -52,15 +53,19 @@ func (b *Bus) Subscribe(topic string) <-chan Event {
 // Non-blocking: drops events if a subscriber's buffer is full.
 // Auto-fills Timestamp if not set. Safe to call after Close() (no-op).
 func (b *Bus) Publish(event Event) {
-	if b.closed.Load() {
-		return
-	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
 
+	// The closed check MUST be inside the RLock to prevent a race with Close():
+	// without the lock, Publish can observe closed=false, then Close() runs fully
+	// (sets closed=true, acquires write lock, closes all channels), and then
+	// Publish acquires the read lock and sends on a closed channel → panic.
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if b.closed.Load() {
+		return
+	}
 
 	// Send to topic-specific subscribers
 	for _, ch := range b.subscribers[event.Type] {
@@ -86,16 +91,23 @@ func (b *Bus) Publish(event Event) {
 	}
 }
 
-// Unsubscribe removes a single subscriber channel from the bus.
-// The channel is NOT closed — the caller owns its lifetime.
-// Typically called when a WebSocket/SSE client disconnects (Phase 3).
+// Unsubscribe removes a subscriber channel from the bus and closes it.
+// Closing the channel signals any goroutine blocked on `range ch` or
+// `<-ch` to unblock and exit — callers must not send on the channel after
+// calling Unsubscribe. Typically called when a WebSocket/SSE client
+// disconnects (Phase 3+).
 // Safe to call after Close() (no-op because all subscribers are already removed).
 func (b *Bus) Unsubscribe(ch <-chan Event) {
+	// The closed check MUST be inside the write lock to prevent a TOCTOU race
+	// with Close(): without the lock, Unsubscribe can observe closed=false,
+	// then Close() runs fully (sets closed=true, acquires write lock, closes
+	// all channels), and then Unsubscribe acquires the lock and calls close()
+	// on an already-closed channel → panic.
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.closed.Load() {
 		return
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	for topic, subs := range b.subscribers {
 		for i, sub := range subs {
@@ -106,6 +118,7 @@ func (b *Bus) Unsubscribe(ch <-chan Event) {
 				if len(b.subscribers[topic]) == 0 {
 					delete(b.subscribers, topic)
 				}
+				close(sub)
 				return
 			}
 		}

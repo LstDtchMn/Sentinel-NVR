@@ -2,7 +2,7 @@
  * Cameras — camera management page with add/delete and live status.
  * Polls /api/v1/cameras every 5s for real-time go2rtc stream health.
  */
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { api, CameraDetail, CameraState, CameraInput } from "../api/client";
 import { Camera, Circle, Plus, Trash2, X } from "lucide-react";
 
@@ -19,6 +19,8 @@ export default function Cameras() {
   const [cameras, setCameras] = useState<CameraDetail[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  // Tracks fire-and-forget manual refresh controllers so they can be cancelled on unmount.
+  const manualCtrlRef = useRef<AbortController | null>(null);
 
   const fetchCameras = useCallback((signal?: AbortSignal) => {
     api
@@ -54,11 +56,16 @@ export default function Cameras() {
     };
   }, [fetchCameras]);
 
+  // Abort manual refresh requests on unmount.
+  useEffect(() => () => manualCtrlRef.current?.abort(), []);
+
   const handleDelete = async (name: string) => {
     if (!window.confirm(`Delete camera "${name}"? This cannot be undone.`)) return;
     try {
       await api.deleteCamera(name);
-      fetchCameras();
+      manualCtrlRef.current?.abort();
+      manualCtrlRef.current = new AbortController();
+      fetchCameras(manualCtrlRef.current.signal);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed");
     }
@@ -66,7 +73,9 @@ export default function Cameras() {
 
   const handleAdded = () => {
     setShowForm(false);
-    fetchCameras();
+    manualCtrlRef.current?.abort();
+    manualCtrlRef.current = new AbortController();
+    fetchCameras(manualCtrlRef.current.signal);
   };
 
   return (

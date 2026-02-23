@@ -6,6 +6,30 @@ server:
   port: 8099
   log_level: "info"     # debug | info | warn | error
 
+auth:
+  enabled: true                        # false = disable auth (dev/trusted-LAN only)
+  access_token_ttl: 900                # Access token lifetime in seconds (15 min)
+  refresh_token_ttl: 604800            # Refresh token lifetime in seconds (7 days)
+  secure_cookie: false                 # true = set Secure flag on cookies (requires HTTPS)
+  allowed_origins:                     # CORS origins allowed for cookie auth (Vite dev server)
+    - "http://localhost:5173"
+
+notifications:
+  enabled: false              # true = dispatch push/webhook notifications on detection and camera events (R9)
+  retry_interval: 60          # Seconds between crash-recovery scans for unsent (pending) log rows
+
+  fcm:                        # Firebase Cloud Messaging — Android + cross-platform push
+    service_account_json: ""  # Absolute path to Google service account .json file
+                              # Obtain: Firebase Console → Project Settings → Service Accounts → Generate key
+
+  apns:                       # Apple Push Notification service — iOS / macOS push
+    key_path: ""              # Absolute path to .p8 auth key file
+                              # Obtain: Apple Developer → Certificates, Identifiers & Profiles → Keys
+    key_id: ""                # 10-character key identifier shown on Apple Developer portal
+    team_id: ""               # 10-character Apple team identifier
+    bundle_id: ""             # App bundle ID, e.g. "com.example.SentinelNVR"
+    sandbox: false            # true = development APNs endpoint; false = production
+
 storage:
   hot_path: "/media/hot"       # Fast storage (SSD) — recent recordings
   cold_path: "/media/cold"     # Archival storage (HDD/NAS)
@@ -20,10 +44,13 @@ database:
 
 detection:
   enabled: false
-  backend: "openvino"          # openvino | tensorrt | coreml | coral
-  model: "general_security"    # Pre-packaged model name
+  backend: "remote"            # remote (CodeProject.AI HTTP API) | mock (for testing) | openvino/tensorrt/coreml/coral (Phase 11)
+  remote_url: "http://codeproject-ai:32168"  # HTTP endpoint for remote detection backend
+  frame_interval: 5            # Seconds between frame grabs per camera
+  snapshot_path: "/data/snapshots"  # Absolute path for detection JPEG snapshots
+  model: "general_security"    # Model name (used by local backends in Phase 11)
   gpu_device: "auto"           # auto | /dev/dri/renderD128 | cuda:0 | etc.
-  confidence_threshold: 0.6
+  confidence_threshold: 0.6    # Minimum confidence [0.0–1.0] to publish a detection event
 
 go2rtc:
   api_url: "http://go2rtc:1984"     # Override with GO2RTC_API env var

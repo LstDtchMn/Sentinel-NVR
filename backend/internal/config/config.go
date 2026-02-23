@@ -13,13 +13,52 @@ import (
 
 // Config is the top-level application configuration loaded from sentinel.yml.
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Database  DatabaseConfig  `yaml:"database"`
-	Detection DetectionConfig `yaml:"detection"`
-	Go2RTC    Go2RTCConfig    `yaml:"go2rtc"`
-	Cameras   []CameraConfig  `yaml:"cameras"`
-	Watchdog  WatchdogConfig  `yaml:"watchdog"`
+	Server        ServerConfig       `yaml:"server"`
+	Auth          AuthConfig         `yaml:"auth"`          // Phase 7: local auth + JWT (CG6)
+	Notifications NotificationConfig `yaml:"notifications"` // Phase 8: FCM/APNs push (R9)
+	Storage       StorageConfig      `yaml:"storage"`
+	Database      DatabaseConfig     `yaml:"database"`
+	Detection     DetectionConfig    `yaml:"detection"`
+	Go2RTC        Go2RTCConfig       `yaml:"go2rtc"`
+	Cameras       []CameraConfig     `yaml:"cameras"`
+	Watchdog      WatchdogConfig     `yaml:"watchdog"`
+}
+
+// NotificationConfig holds push notification provider settings (Phase 8, R9).
+// Set enabled: true and configure at least one provider (fcm, apns, or webhook)
+// to receive push notifications on detection and camera events.
+type NotificationConfig struct {
+	Enabled       bool       `yaml:"enabled"`
+	RetryInterval int        `yaml:"retry_interval"` // seconds between crash-recovery scans; default 60
+	FCM           FCMConfig  `yaml:"fcm"`
+	APNs          APNsConfig `yaml:"apns"`
+}
+
+// FCMConfig holds Firebase Cloud Messaging service account credentials (Phase 8, R9).
+// Obtain the service account JSON from Firebase Console →
+// Project Settings → Service Accounts → Generate new private key.
+type FCMConfig struct {
+	ServiceAccountJSON string `yaml:"service_account_json"` // absolute path to service account .json file
+}
+
+// APNsConfig holds Apple Push Notification service credentials (Phase 8, R9).
+// Obtain the .p8 auth key from Apple Developer portal →
+// Certificates, Identifiers & Profiles → Keys.
+type APNsConfig struct {
+	KeyPath  string `yaml:"key_path"`  // absolute path to .p8 auth key file
+	KeyID    string `yaml:"key_id"`    // 10-character key identifier from Apple
+	TeamID   string `yaml:"team_id"`   // 10-character Apple team identifier
+	BundleID string `yaml:"bundle_id"` // app bundle ID, e.g. "com.example.SentinelNVR"
+	Sandbox  bool   `yaml:"sandbox"`   // true = development APNs endpoint; false = production
+}
+
+// AuthConfig controls local authentication and JWT session management (Phase 7, CG6).
+type AuthConfig struct {
+	Enabled          bool   `yaml:"enabled"`           // default true; set false to disable auth (dev/trusted-LAN only)
+	AccessTokenTTL   int    `yaml:"access_token_ttl"`  // seconds; default 900 (15 min)
+	RefreshTokenTTL  int    `yaml:"refresh_token_ttl"` // seconds; default 604800 (7 days)
+	SecureCookie     bool   `yaml:"secure_cookie"`     // set Secure flag on cookies; enable when running HTTPS
+	AllowedOrigins   []string `yaml:"allowed_origins"` // CORS origins for cookie-based auth; default ["http://localhost:5173"]
 }
 
 // Go2RTCConfig holds connection settings for the go2rtc sidecar (CG3).
@@ -53,10 +92,13 @@ type DatabaseConfig struct {
 	WALMode bool   `yaml:"wal_mode"`
 }
 
-// DetectionConfig holds AI detection backend settings (CG10, R8).
+// DetectionConfig holds AI detection backend settings (CG10, R3).
 type DetectionConfig struct {
 	Enabled             bool     `yaml:"enabled"`
 	Backend             string   `yaml:"backend"`
+	RemoteURL           string   `yaml:"remote_url"`     // Phase 5: HTTP endpoint for remote detection (CodeProject.AI format)
+	FrameInterval       int      `yaml:"frame_interval"` // Phase 5: seconds between frame grabs per camera
+	SnapshotPath        string   `yaml:"snapshot_path"`  // Phase 5: absolute path for JPEG snapshot storage
 	Model               string   `yaml:"model"`
 	GPUDevice           string   `yaml:"gpu_device"`
 	ConfidenceThreshold *float64 `yaml:"confidence_threshold"` // pointer to distinguish unset from 0.0
@@ -149,6 +191,56 @@ func Validate(cfg *Config) error {
 		t := *cfg.Detection.ConfidenceThreshold
 		if t < 0.0 || t > 1.0 {
 			return fmt.Errorf("detection.confidence_threshold %g is out of range [0.0, 1.0]", t)
+		}
+	}
+
+	if cfg.Detection.Enabled {
+		if cfg.Detection.Backend == "remote" {
+			if err := validateURL(cfg.Detection.RemoteURL, "detection.remote_url"); err != nil {
+				return err
+			}
+		}
+		if !filepath.IsAbs(cfg.Detection.SnapshotPath) {
+			return fmt.Errorf("detection.snapshot_path must be an absolute path, got %q", cfg.Detection.SnapshotPath)
+		}
+		if cfg.Detection.FrameInterval < 1 {
+			return fmt.Errorf("detection.frame_interval must be >= 1, got %d", cfg.Detection.FrameInterval)
+		}
+	}
+
+	// Validate notification provider config (Phase 8, R9).
+	if cfg.Notifications.Enabled {
+		if cfg.Notifications.RetryInterval < 1 {
+			return fmt.Errorf("notifications.retry_interval must be >= 1, got %d", cfg.Notifications.RetryInterval)
+		}
+		fcm := cfg.Notifications.FCM
+		if fcm.ServiceAccountJSON != "" && !filepath.IsAbs(fcm.ServiceAccountJSON) {
+			return fmt.Errorf("notifications.fcm.service_account_json must be an absolute path, got %q", fcm.ServiceAccountJSON)
+		}
+		apns := cfg.Notifications.APNs
+		if apns.KeyPath != "" {
+			if !filepath.IsAbs(apns.KeyPath) {
+				return fmt.Errorf("notifications.apns.key_path must be an absolute path, got %q", apns.KeyPath)
+			}
+			if apns.KeyID == "" {
+				return fmt.Errorf("notifications.apns.key_id is required when key_path is set")
+			}
+			if apns.TeamID == "" {
+				return fmt.Errorf("notifications.apns.team_id is required when key_path is set")
+			}
+			if apns.BundleID == "" {
+				return fmt.Errorf("notifications.apns.bundle_id is required when key_path is set")
+			}
+		}
+	}
+
+	// Validate watchdog intervals — time.NewTicker panics on non-positive duration.
+	if cfg.Watchdog.Enabled {
+		if cfg.Watchdog.HealthInterval <= 0 {
+			return fmt.Errorf("watchdog.health_interval must be > 0, got %d", cfg.Watchdog.HealthInterval)
+		}
+		if cfg.Watchdog.RestartDelay < 0 {
+			return fmt.Errorf("watchdog.restart_delay must be >= 0, got %d", cfg.Watchdog.RestartDelay)
 		}
 	}
 
@@ -255,11 +347,33 @@ func setDefaults(cfg *Config) {
 	if cfg.Detection.Backend == "" {
 		cfg.Detection.Backend = "openvino"
 	}
+	if cfg.Detection.RemoteURL == "" {
+		cfg.Detection.RemoteURL = "http://codeproject-ai:32168"
+	}
+	if cfg.Detection.FrameInterval == 0 {
+		cfg.Detection.FrameInterval = 5 // grab a frame every 5 seconds per camera
+	}
+	if cfg.Detection.SnapshotPath == "" {
+		cfg.Detection.SnapshotPath = "/data/snapshots"
+	}
 	if cfg.Detection.GPUDevice == "" {
 		cfg.Detection.GPUDevice = "auto"
 	}
 	// ConfidenceThreshold default is handled by ConfidenceThresholdValue() method
 	// instead of overwriting 0.0 (which is a valid intentional value).
+	// Auth defaults (Phase 7, CG6). Enabled is not defaulted here — it mirrors
+	// the pattern of WatchdogConfig.Enabled and DetectionConfig.Enabled (explicit
+	// opt-in). Set auth.enabled: true in sentinel.yml to activate authentication.
+	if cfg.Auth.AccessTokenTTL == 0 {
+		cfg.Auth.AccessTokenTTL = 900 // 15 minutes
+	}
+	if cfg.Auth.RefreshTokenTTL == 0 {
+		cfg.Auth.RefreshTokenTTL = 604800 // 7 days
+	}
+	if len(cfg.Auth.AllowedOrigins) == 0 {
+		cfg.Auth.AllowedOrigins = []string{"http://localhost:5173"}
+	}
+
 	if cfg.Go2RTC.APIURL == "" {
 		cfg.Go2RTC.APIURL = "http://go2rtc:1984"
 	}
@@ -278,5 +392,10 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Watchdog.RestartDelay == 0 {
 		cfg.Watchdog.RestartDelay = 5
+	}
+
+	// Notification defaults (Phase 8, R9)
+	if cfg.Notifications.RetryInterval == 0 {
+		cfg.Notifications.RetryInterval = 60 // re-check pending deliveries every minute
 	}
 }

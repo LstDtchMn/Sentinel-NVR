@@ -12,11 +12,12 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5173,
     proxy: {
-      // Proxies all /api/* requests to the backend. Phase 3 will need additional
-      // proxy rules for WebSocket (/ws) paths used by go2rtc live view.
+      // Proxies all /api/* requests to the backend, including WebSocket upgrades
+      // for live stream proxying (Phase 3: /api/v1/streams/:name/ws).
       "/api": {
         target: apiTarget,
         changeOrigin: true,
+        ws: true,
       },
     },
   },

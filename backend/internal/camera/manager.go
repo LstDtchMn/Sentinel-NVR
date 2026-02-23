@@ -13,8 +13,10 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/detection"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
@@ -115,6 +117,8 @@ type Manager struct {
 	storageCfg config.StorageConfig
 	rtspBase   string // go2rtc RTSP base URL (e.g. "rtsp://go2rtc:8554")
 	recRepo    *recording.Repository
+	detector   detection.Detector      // nil if detection is disabled globally (Phase 5)
+	detCfg     config.DetectionConfig  // detection settings passed to each pipeline
 	logger     *slog.Logger
 	cameras    map[string]*Pipeline
 	wg         sync.WaitGroup
@@ -122,6 +126,8 @@ type Manager struct {
 }
 
 // NewManager creates a camera manager backed by the database and go2rtc.
+// detector may be nil when detection is disabled — each Pipeline checks for nil
+// before creating a DetectionPipeline.
 func NewManager(
 	repo *Repository,
 	g2r *go2rtc.Client,
@@ -129,6 +135,8 @@ func NewManager(
 	storageCfg config.StorageConfig,
 	rtspBase string,
 	recRepo *recording.Repository,
+	detector detection.Detector,
+	detCfg config.DetectionConfig,
 	logger *slog.Logger,
 ) *Manager {
 	return &Manager{
@@ -138,6 +146,8 @@ func NewManager(
 		storageCfg: storageCfg,
 		rtspBase:   rtspBase,
 		recRepo:    recRepo,
+		detector:   detector,
+		detCfg:     detCfg,
 		logger:     logger.With("component", "camera_manager"),
 		cameras:    make(map[string]*Pipeline),
 	}
@@ -166,11 +176,12 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.logger.Error("failed to sync camera to go2rtc",
 				"name", cam.Name,
 				"main_stream", RedactStreamURL(cam.MainStream),
+				"error", err,
 			)
 			// Don't fail startup — pipeline will detect missing stream
 		}
 
-		pipeline := NewPipeline(&cam, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.bus, m.logger)
+		pipeline := NewPipeline(&cam, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger)
 		m.mu.Lock()
 		m.cameras[cam.Name] = pipeline
 		m.wg.Add(1)
@@ -224,10 +235,11 @@ func (m *Manager) AddCamera(ctx context.Context, cam *CameraRecord) (*CameraWith
 			m.logger.Error("failed to sync new camera to go2rtc",
 				"name", created.Name,
 				"main_stream", RedactStreamURL(created.MainStream),
+				"error", err,
 			)
 		}
 
-		pipeline := NewPipeline(created, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.bus, m.logger)
+		pipeline := NewPipeline(created, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger)
 		m.mu.Lock()
 		m.cameras[created.Name] = pipeline
 		m.wg.Add(1) // must be inside lock so Stop() can't race between map insert and wg tracking
@@ -280,7 +292,8 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 	streamChanged := old.MainStream != updated.MainStream || old.SubStream != updated.SubStream
 	enabledChanged := old.Enabled != updated.Enabled
 	recordChanged := old.Record != updated.Record
-	needsRestart := streamChanged || enabledChanged || recordChanged
+	detectChanged := old.Detect != updated.Detect
+	needsRestart := streamChanged || enabledChanged || recordChanged || detectChanged
 
 	if needsRestart {
 		// Stop old pipeline if running
@@ -295,23 +308,40 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 
 		// Wait for old pipeline goroutine to fully exit before starting new one,
 		// preventing two ffmpeg processes writing to the same camera's directory.
+		// Uses a background timeout (not request ctx) to avoid zombie pipelines:
+		// if we returned on ctx.Done(), the camera would be removed from the map
+		// with the DB updated but no pipeline running — stuck offline with no
+		// automated recovery.
 		if oldPipeline != nil {
-			<-oldPipeline.startDone
+			waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			select {
+			case <-oldPipeline.startDone:
+				waitCancel()
+			case <-waitCtx.Done():
+				waitCancel()
+				m.logger.Error("timed out waiting for old pipeline to exit, proceeding with restart", "name", name)
+			}
 		}
 
+		// Pipeline lifecycle uses a background context with its own timeout so that
+		// go2rtc network calls complete even if the HTTP request is cancelled.
+		lifecycleCtx, lifecycleCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer lifecycleCancel()
+
 		// Remove old streams from go2rtc
-		m.removeFromGo2RTC(ctx, name, old.SubStream != "")
+		m.removeFromGo2RTC(lifecycleCtx, name, old.SubStream != "")
 
 		// Start new pipeline if enabled
 		if updated.Enabled {
-			if err := m.syncToGo2RTC(ctx, updated); err != nil {
+			if err := m.syncToGo2RTC(lifecycleCtx, updated); err != nil {
 				m.logger.Error("failed to sync updated camera to go2rtc",
 					"name", name,
 					"main_stream", RedactStreamURL(updated.MainStream),
+					"error", err,
 				)
 			}
 
-			pipeline := NewPipeline(updated, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.bus, m.logger)
+			pipeline := NewPipeline(updated, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger)
 			m.mu.Lock()
 			m.cameras[name] = pipeline
 			m.wg.Add(1) // must be inside lock so Stop() can't race between map insert and wg tracking
@@ -362,13 +392,29 @@ func (m *Manager) RemoveCamera(ctx context.Context, name string) error {
 	}
 	m.mu.Unlock()
 
-	// Wait for pipeline goroutine to fully exit
+	// Wait for pipeline goroutine to fully exit. Uses the request context (unlike
+	// UpdateCamera which uses a background timeout) because cancellation here is
+	// safe: the camera is already removed from the map, so there is no zombie
+	// pipeline risk. The caller can retry the delete, and the orphaned pipeline
+	// will stop on its own. UpdateCamera cannot use ctx.Done() because returning
+	// early there would leave the DB updated but no pipeline running — stuck
+	// offline with no automated recovery path.
 	if oldPipeline != nil {
-		<-oldPipeline.startDone
+		select {
+		case <-oldPipeline.startDone:
+		case <-ctx.Done():
+			m.logger.Warn("context cancelled while waiting for pipeline to exit during removal", "name", name)
+			return ctx.Err()
+		}
 	}
 
+	// Pipeline lifecycle uses a background context so go2rtc cleanup completes
+	// even if the HTTP request is cancelled.
+	lifecycleCtx, lifecycleCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer lifecycleCancel()
+
 	// Remove from go2rtc
-	m.removeFromGo2RTC(ctx, name, cam.SubStream != "")
+	m.removeFromGo2RTC(lifecycleCtx, name, cam.SubStream != "")
 
 	// Delete recording files from disk first: if this fails, the caller gets an error
 	// and the DB record survives, allowing a retry. If we deleted the DB row first and
@@ -418,6 +464,10 @@ func (m *Manager) ListCameras(ctx context.Context) ([]CameraWithStatus, error) {
 		result[i] = CameraWithStatus{CameraRecord: cam}
 		if pipeline, exists := m.cameras[cam.Name]; exists {
 			result[i].PipelineStatus = pipeline.Status()
+		} else {
+			// No active pipeline (disabled camera) — return explicit idle state
+			// so the API never returns an empty string for state.
+			result[i].PipelineStatus = PipelineStatus{State: StateIdle}
 		}
 	}
 	return result, nil
@@ -434,6 +484,8 @@ func (m *Manager) GetCamera(ctx context.Context, name string) (*CameraWithStatus
 	m.mu.RLock()
 	if pipeline, exists := m.cameras[name]; exists {
 		result.PipelineStatus = pipeline.Status()
+	} else {
+		result.PipelineStatus = PipelineStatus{State: StateIdle}
 	}
 	m.mu.RUnlock()
 

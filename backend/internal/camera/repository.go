@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/auth"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 )
 
@@ -35,13 +36,34 @@ type CameraRecord struct {
 }
 
 // Repository provides CRUD operations for cameras in SQLite.
+// authSvc may be nil when auth is disabled — credentials are stored plaintext in that case.
 type Repository struct {
-	db *sql.DB
+	db      *sql.DB
+	authSvc *auth.Service // Phase 7: AES-256-GCM camera credential encryption (CG6)
 }
 
 // NewRepository creates a camera repository backed by the given database.
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+// authSvc may be nil (auth disabled) — credentials are stored and read as plaintext.
+func NewRepository(db *sql.DB, authSvc *auth.Service) *Repository {
+	return &Repository{db: db, authSvc: authSvc}
+}
+
+// encryptPass encrypts the ONVIF password before DB storage.
+// Returns plaintext unchanged when authSvc is nil (encryption not available).
+func (r *Repository) encryptPass(pass string) (string, error) {
+	if r.authSvc == nil || pass == "" {
+		return pass, nil
+	}
+	return r.authSvc.EncryptCredential(pass)
+}
+
+// decryptPass decrypts an ONVIF password read from the DB.
+// Values not prefixed with "enc:" are returned unchanged for backward compat.
+func (r *Repository) decryptPass(pass string) (string, error) {
+	if r.authSvc == nil {
+		return pass, nil
+	}
+	return r.authSvc.DecryptCredential(pass)
 }
 
 // List returns all cameras ordered by name.
@@ -57,7 +79,7 @@ func (r *Repository) List(ctx context.Context) ([]CameraRecord, error) {
 
 	var cameras []CameraRecord
 	for rows.Next() {
-		cam, err := scanCamera(rows)
+		cam, err := r.scanCamera(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -73,7 +95,7 @@ func (r *Repository) GetByName(ctx context.Context, name string) (*CameraRecord,
 		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
 		FROM cameras WHERE name = ?`, name)
 
-	cam, err := scanCameraRow(row)
+	cam, err := r.scanCameraRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -83,18 +105,40 @@ func (r *Repository) GetByName(ctx context.Context, name string) (*CameraRecord,
 	return &cam, nil
 }
 
+// GetByID returns the camera with the given numeric ID, or ErrNotFound if absent.
+func (r *Repository) GetByID(ctx context.Context, id int) (*CameraRecord, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, name, enabled, main_stream, sub_stream, record, detect,
+		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
+		FROM cameras WHERE id = ?`, id)
+
+	cam, err := r.scanCameraRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting camera id=%d: %w", id, err)
+	}
+	return &cam, nil
+}
+
 // Create inserts a new camera and returns the created record with ID and timestamps.
 func (r *Repository) Create(ctx context.Context, cam *CameraRecord) (*CameraRecord, error) {
+	encPass, err := r.encryptPass(cam.ONVIFPass)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting camera credential: %w", err)
+	}
+
 	var id int
 	var createdAt, updatedAt time.Time
 
-	err := r.db.QueryRowContext(ctx, `
+	err = r.db.QueryRowContext(ctx, `
 		INSERT INTO cameras (name, enabled, main_stream, sub_stream, record, detect,
 		                     onvif_host, onvif_port, onvif_user, onvif_pass)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id, created_at, updated_at`,
 		cam.Name, cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect,
-		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, cam.ONVIFPass,
+		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, encPass,
 	).Scan(&id, &createdAt, &updatedAt)
 
 	if err != nil {
@@ -114,10 +158,15 @@ func (r *Repository) Create(ctx context.Context, cam *CameraRecord) (*CameraReco
 
 // Update modifies an existing camera by name and returns the updated record.
 func (r *Repository) Update(ctx context.Context, name string, cam *CameraRecord) (*CameraRecord, error) {
+	encPass, err := r.encryptPass(cam.ONVIFPass)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting camera credential: %w", err)
+	}
+
 	var id int
 	var createdAt, updatedAt time.Time
 
-	err := r.db.QueryRowContext(ctx, `
+	err = r.db.QueryRowContext(ctx, `
 		UPDATE cameras
 		SET enabled = ?, main_stream = ?, sub_stream = ?, record = ?, detect = ?,
 		    onvif_host = ?, onvif_port = ?, onvif_user = ?, onvif_pass = ?,
@@ -125,7 +174,7 @@ func (r *Repository) Update(ctx context.Context, name string, cam *CameraRecord)
 		WHERE name = ?
 		RETURNING id, created_at, updated_at`,
 		cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect,
-		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, cam.ONVIFPass,
+		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, encPass,
 		name,
 	).Scan(&id, &createdAt, &updatedAt)
 
@@ -201,12 +250,16 @@ func (r *Repository) SeedFromConfig(ctx context.Context, cameras []config.Camera
 		if err := ValidateCameraInput(rec); err != nil {
 			return fmt.Errorf("seeding camera %q: invalid config: %w", cam.Name, err)
 		}
-		_, err := tx.ExecContext(ctx, `
+		encPass, err := r.encryptPass(cam.ONVIF.Password)
+		if err != nil {
+			return fmt.Errorf("seeding camera %q: encrypting credential: %w", cam.Name, err)
+		}
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cameras (name, enabled, main_stream, sub_stream, record, detect,
 			                     onvif_host, onvif_port, onvif_user, onvif_pass)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			cam.Name, cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect,
-			cam.ONVIF.Host, cam.ONVIF.Port, cam.ONVIF.User, cam.ONVIF.Password,
+			cam.ONVIF.Host, cam.ONVIF.Port, cam.ONVIF.User, encPass,
 		)
 		if err != nil {
 			return fmt.Errorf("seeding camera %q: %w", cam.Name, err)
@@ -215,8 +268,8 @@ func (r *Repository) SeedFromConfig(ctx context.Context, cameras []config.Camera
 	return tx.Commit()
 }
 
-// scanCamera scans a CameraRecord from a *sql.Rows iterator.
-func scanCamera(rows *sql.Rows) (CameraRecord, error) {
+// scanCamera scans a CameraRecord from a *sql.Rows iterator and decrypts the ONVIF password.
+func (r *Repository) scanCamera(rows *sql.Rows) (CameraRecord, error) {
 	var cam CameraRecord
 	var enabled, record, detect int64
 	err := rows.Scan(
@@ -231,11 +284,15 @@ func scanCamera(rows *sql.Rows) (CameraRecord, error) {
 	cam.Enabled = enabled != 0
 	cam.Record = record != 0
 	cam.Detect = detect != 0
+	cam.ONVIFPass, err = r.decryptPass(cam.ONVIFPass)
+	if err != nil {
+		return cam, fmt.Errorf("decrypting camera %q credential: %w", cam.Name, err)
+	}
 	return cam, nil
 }
 
-// scanCameraRow scans a CameraRecord from a *sql.Row.
-func scanCameraRow(row *sql.Row) (CameraRecord, error) {
+// scanCameraRow scans a CameraRecord from a *sql.Row and decrypts the ONVIF password.
+func (r *Repository) scanCameraRow(row *sql.Row) (CameraRecord, error) {
 	var cam CameraRecord
 	var enabled, record, detect int64
 	err := row.Scan(
@@ -250,6 +307,10 @@ func scanCameraRow(row *sql.Row) (CameraRecord, error) {
 	cam.Enabled = enabled != 0
 	cam.Record = record != 0
 	cam.Detect = detect != 0
+	cam.ONVIFPass, err = r.decryptPass(cam.ONVIFPass)
+	if err != nil {
+		return cam, fmt.Errorf("decrypting camera %q credential: %w", cam.Name, err)
+	}
 	return cam, nil
 }
 
