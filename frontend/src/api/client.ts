@@ -317,6 +317,16 @@ export interface RetentionRule {
   updated_at: string;
 }
 
+/** AI model entry returned by GET /models (R10). */
+export interface ModelEntry {
+  filename: string;
+  name: string;
+  description: string;
+  size_bytes: number;
+  installed: boolean;
+  curated: boolean;
+}
+
 /**
  * Combines two AbortSignals so aborting either one aborts the result.
  * Uses the native AbortSignal.any() when available (Chrome 116+, Firefox 124+,
@@ -836,6 +846,54 @@ class ApiClient {
   /** Deletes a retention rule (DELETE /retention/rules/:id). */
   async deleteRetentionRule(id: number, signal?: AbortSignal): Promise<void> {
     await this.request(`/retention/rules/${id}`, { method: "DELETE", signal });
+  }
+
+  // --- AI Model Management (R10) ---
+
+  /** Lists all models (curated manifest + locally installed). */
+  async listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
+    return this.request<ModelEntry[]>("/models", { signal });
+  }
+
+  /** Triggers download of a curated model by filename. */
+  async downloadModel(filename: string, signal?: AbortSignal): Promise<{ filename: string; status: string }> {
+    return this.request<{ filename: string; status: string }>(`/models/${encodeURIComponent(filename)}/download`, {
+      method: "POST",
+      signal,
+    });
+  }
+
+  /** Uploads a custom ONNX model file. */
+  async uploadModel(file: File, signal?: AbortSignal): Promise<{ filename: string; size_bytes: number; status: string }> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const timeoutCtrl = new AbortController();
+    const timeoutId = setTimeout(() => timeoutCtrl.abort(), 300_000); // 5 min for large models
+    const sig = signal
+      ? combineSignals(signal, timeoutCtrl.signal)
+      : timeoutCtrl.signal;
+    try {
+      const resp = await fetch(`${API_BASE}/models/upload`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+        signal: sig,
+      });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        throw new Error(`API error ${resp.status}: ${detail}`);
+      }
+      return (await resp.json()) as { filename: string; size_bytes: number; status: string };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /** Deletes a locally installed model by filename. */
+  async deleteModel(filename: string, signal?: AbortSignal): Promise<void> {
+    await this.request(`/models/${encodeURIComponent(filename)}`, { method: "DELETE", signal });
   }
 
   /** Executes the import — creates cameras from the uploaded file (admin only). */

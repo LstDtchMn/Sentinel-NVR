@@ -35,6 +35,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/storage"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/watchdog"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/models"
 )
 
 // version is set at build time via -ldflags="-X main.version=x.y.z".
@@ -332,9 +333,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize model manager (R10).
+	modelMgr := models.NewManager(cfg.Models.Dir, cfg.Models.BaseURL, logger)
+
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, g2rClient, bus, notifRepo, logger)
+	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, modelMgr, g2rClient, bus, notifRepo, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err

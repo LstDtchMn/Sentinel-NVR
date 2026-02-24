@@ -19,10 +19,19 @@ type Config struct {
 	Storage       StorageConfig      `yaml:"storage"`
 	Database      DatabaseConfig     `yaml:"database"`
 	Detection     DetectionConfig    `yaml:"detection"`
+	Models        ModelsConfig       `yaml:"models"`        // R10: AI model management
 	Go2RTC        Go2RTCConfig       `yaml:"go2rtc"`
 	Cameras       []CameraConfig     `yaml:"cameras"`
 	Watchdog      WatchdogConfig     `yaml:"watchdog"`
 	Relay         RelayConfig        `yaml:"relay"`     // Phase 12: remote access via TURN relay (CG11, R8)
+}
+
+// ModelsConfig holds AI model management settings (R10).
+// ModelsDir is where ONNX model files are stored; BaseURL points to a remote
+// server for one-click downloads (empty = manual install only).
+type ModelsConfig struct {
+	Dir     string `yaml:"dir"`      // default "/data/models"
+	BaseURL string `yaml:"base_url"` // e.g. "https://models.sentinel-nvr.dev/v1"; empty = manual only
 }
 
 // NotificationConfig holds push notification provider settings (Phase 8, R9).
@@ -542,5 +551,10 @@ func setDefaults(cfg *Config) {
 	// Relay defaults (Phase 12, CG11)
 	if cfg.Relay.STUNServer == "" {
 		cfg.Relay.STUNServer = "stun:stun.l.google.com:19302"
+	}
+
+	// Models defaults (R10)
+	if cfg.Models.Dir == "" {
+		cfg.Models.Dir = "/data/models"
 	}
 }

@@ -466,6 +466,8 @@ export default function Settings() {
                 <option value="audio_detection">audio_detection</option>
                 <option value="camera.online">camera.online</option>
                 <option value="camera.offline">camera.offline</option>
+                <option value="camera.connected">camera.connected</option>
+                <option value="camera.disconnected">camera.disconnected</option>
                 <option value="camera.error">camera.error</option>
               </select>
             </div>

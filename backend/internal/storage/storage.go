@@ -425,9 +425,10 @@ func (m *Manager) runEventCleaner(ctx context.Context) {
 	}
 }
 
-// knownEventTypes lists the event types emitted by the backend that can appear
-// in the events table. Used to enumerate per-type passes during cleanup.
-var knownEventTypes = []string{
+// KnownEventTypes lists the event types emitted by the backend that can appear
+// in the events table. Used to enumerate per-type passes during cleanup and to
+// validate retention rule creation.
+var KnownEventTypes = []string{
 	"detection",
 	"face_match",
 	"audio_detection",
@@ -504,7 +505,7 @@ func (m *Manager) runEventCleanerOnce(ctx context.Context) {
 		}
 		camID := *rule.CameraID
 		cutoff := time.Now().AddDate(0, 0, -rule.EventsDays)
-		types := knownEventTypes
+		types := KnownEventTypes
 		if rule.EventType != nil {
 			types = []string{*rule.EventType}
 		}
@@ -540,7 +541,7 @@ func (m *Manager) runEventCleanerOnce(ctx context.Context) {
 	// any (camera, type) pair not yet handled by a camera-specific rule above.
 	// Uses nil cameraID so the query matches all cameras at once.
 	globalDays := m.cfg.ColdRetentionDays // default: use cold retention as event TTL
-	for _, evType := range knownEventTypes {
+	for _, evType := range KnownEventTypes {
 		days := effectiveDays(-1, evType)
 		if days < 0 {
 			days = globalDays

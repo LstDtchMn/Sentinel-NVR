@@ -17,6 +17,7 @@ import Cameras from "./pages/Cameras";
 import Settings from "./pages/Settings";
 import NotificationSettings from "./pages/NotificationSettings";
 import Faces from "./pages/Faces";
+import Models from "./pages/Models";
 import Import from "./pages/Import";
 import ZoneEditor from "./pages/ZoneEditor";
 import Login from "./pages/Login";
@@ -62,6 +63,7 @@ function AppShell() {
             <Route path="/cameras" element={<Cameras />} />
             <Route path="/cameras/:name/zones" element={<ZoneEditor />} />
             <Route path="/faces" element={<Faces />} />
+            <Route path="/models" element={<Models />} />
             <Route path="/import" element={<Import />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/notifications" element={<NotificationSettings />} />
