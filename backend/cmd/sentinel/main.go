@@ -1,9 +1,10 @@
 // Sentinel NVR — the main entry point.
 // Startup order: config → validate → logging → SQLite → event bus → auth (keys + admin) →
-//   camera repo (seed) → go2rtc → camera manager → watchdog → storage manager → HTTP server.
+//   camera repo (seed) → go2rtc → detector (+ sentinel-infer subprocess if backend=onnx) →
+//   camera manager → watchdog → storage manager → HTTP server.
 // Graceful shutdown on SIGINT/SIGTERM with 30s timeout.
 // Shutdown order: event bus (unblocks SSE handlers) → persister (drain) → HTTP server →
-//   cameras → storage → watchdog → database.
+//   cameras → sentinel-infer → storage → watchdog → database.
 package main
 
 import (
@@ -191,6 +192,26 @@ func main() {
 	if detector != nil {
 		logger.Info("detection backend initialized", "backend", cfg.Detection.Backend)
 	}
+
+	// Wire the Startable interface for detectors that manage a subprocess lifecycle.
+	// LocalDetector (backend=onnx) launches sentinel-infer and waits for its /health
+	// endpoint before returning — ensuring inference is available when the first camera
+	// pipeline starts. startableDetector is nil for remote and mock backends.
+	var startableDetector detection.Startable
+	if detector != nil {
+		if sd, ok := detector.(detection.Startable); ok {
+			inferCtx, inferCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := sd.Start(inferCtx); err != nil {
+				inferCancel()
+				logger.Error("failed to start local inference server", "error", err)
+				os.Exit(1)
+			}
+			inferCancel()
+			startableDetector = sd
+			logger.Info("local inference server started", "backend", cfg.Detection.Backend)
+		}
+	}
+
 	detRepo := detection.NewRepository(database)
 	logger.Info("event repository initialized") // always active; serves /api/v1/events regardless of detection.enabled
 
@@ -351,6 +372,9 @@ func main() {
 	}
 
 	camManager.Stop()      // bus.Publish is a safe no-op after bus.Close()
+	if startableDetector != nil {
+		startableDetector.Stop() // send SIGINT to sentinel-infer after the last detection frame
+	}
 	storageManager.Stop() // cancel worker contexts and wait for in-flight batch to finish
 	wd.Stop()
 
