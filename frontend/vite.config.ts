@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -8,6 +9,13 @@ const apiTarget = process.env.VITE_API_TARGET || "http://sentinel:8099";
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    // Run tests in a jsdom environment so DOM globals are available for
+    // future component tests.  Pure utility tests run fine here too.
+    environment: "jsdom",
+    // Expose vitest globals (describe, it, expect) without needing imports.
+    globals: true,
+  },
   server: {
     host: "0.0.0.0",
     port: 5173,
