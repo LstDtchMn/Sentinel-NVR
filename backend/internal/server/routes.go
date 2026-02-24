@@ -2134,10 +2134,11 @@ func (s *Server) handleCreateFace(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name must be 1-128 characters"})
 		return
 	}
-	// ArcFace embeddings are 512-dim; enforce a reasonable range to prevent
-	// storage abuse (a 1M-element array would bloat the BLOB and CPU in cosine similarity).
-	if len(req.Embedding) < 64 || len(req.Embedding) > 2048 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "embedding must have 64-2048 dimensions"})
+	// sentinel-infer uses ArcFace which produces 512-dim unit vectors.
+	// Reject anything else so cosine similarity calculations are consistent
+	// and malformed clients cannot store oversized BLOBs.
+	if len(req.Embedding) != 512 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "embedding must have exactly 512 dimensions (ArcFace)"})
 		return
 	}
 

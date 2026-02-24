@@ -230,6 +230,9 @@ func Validate(cfg *Config) error {
 	if cfg.Storage.ColdPath != "" && !filepath.IsAbs(cfg.Storage.ColdPath) {
 		return fmt.Errorf("storage.cold_path must be an absolute path, got %q", cfg.Storage.ColdPath)
 	}
+	if cfg.Storage.ColdPath != "" && filepath.Clean(cfg.Storage.HotPath) == filepath.Clean(cfg.Storage.ColdPath) {
+		return fmt.Errorf("storage.hot_path and storage.cold_path must be different directories")
+	}
 	if cfg.Storage.HotRetentionDays < 1 {
 		return fmt.Errorf("storage.hot_retention_days must be >= 1, got %d", cfg.Storage.HotRetentionDays)
 	}
