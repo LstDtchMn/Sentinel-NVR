@@ -8,7 +8,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/dbutil"
 )
 
 var ErrNotFound = errors.New("recording not found")
@@ -36,28 +39,6 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
-// parseSQLiteTime parses a timestamp string from SQLite (CURRENT_TIMESTAMP or driver-formatted).
-// modernc.org/sqlite stores time.Time as text and does not auto-parse on scan.
-//
-// Layout coverage:
-//   - "2006-01-02 15:04:05"         — SQLite CURRENT_TIMESTAMP (always UTC)
-//   - "2006-01-02T15:04:05Z"        — ISO8601 UTC with Z suffix
-//   - "2006-01-02T15:04:05"         — ISO8601 without timezone (treat as UTC)
-//   - time.RFC3339 / RFC3339Nano    — driver-formatted time.Time with offset (e.g. +05:30)
-func parseSQLiteTime(s string) (time.Time, error) {
-	for _, layout := range []string{
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05Z",
-		"2006-01-02T15:04:05",
-		time.RFC3339,
-		time.RFC3339Nano,
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("cannot parse timestamp %q", s)
-}
 
 // Create inserts a new recording segment with all available metadata.
 // For completed segments (reported by ffmpeg's segment_list), all fields are available.
@@ -77,7 +58,7 @@ func (r *Repository) Create(ctx context.Context, rec *Record) (*Record, error) {
 	if err := row.Scan(&id, &createdStr); err != nil {
 		return nil, fmt.Errorf("inserting recording: %w", err)
 	}
-	createdAt, err := parseSQLiteTime(createdStr)
+	createdAt, err := dbutil.ParseSQLiteTime(createdStr)
 	if err != nil {
 		return nil, fmt.Errorf("inserting recording: invalid created_at %q: %w", createdStr, err)
 	}
@@ -103,24 +84,52 @@ func (r *Repository) Get(ctx context.Context, id int) (*Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("getting recording: %w", err)
 	}
-	startTime, err := parseSQLiteTime(startStr)
+	startTime, err := dbutil.ParseSQLiteTime(startStr)
 	if err != nil {
 		return nil, fmt.Errorf("getting recording %d: invalid start_time %q: %w", id, startStr, err)
 	}
 	rec.StartTime = startTime
-	createdAt, err := parseSQLiteTime(createdStr)
+	createdAt, err := dbutil.ParseSQLiteTime(createdStr)
 	if err != nil {
 		return nil, fmt.Errorf("getting recording %d: invalid created_at %q: %w", id, createdStr, err)
 	}
 	rec.CreatedAt = createdAt
 	if endStr != nil {
-		t, err := parseSQLiteTime(*endStr)
+		t, err := dbutil.ParseSQLiteTime(*endStr)
 		if err != nil {
 			return nil, fmt.Errorf("getting recording %d: invalid end_time %q: %w", id, *endStr, err)
 		}
 		rec.EndTime = &t
 	}
 	return rec, nil
+}
+
+// Count returns the total number of recording segments matching the filters.
+// Pass cameraName="" to count across all cameras; zero-value start/end times are ignored.
+func (r *Repository) Count(ctx context.Context, cameraName string, start, end time.Time) (int, error) {
+	query := `SELECT COUNT(*) FROM recordings`
+	var args []any
+	var conditions []string
+	if cameraName != "" {
+		conditions = append(conditions, "camera_name = ?")
+		args = append(args, cameraName)
+	}
+	if !start.IsZero() {
+		conditions = append(conditions, "start_time >= ?")
+		args = append(args, start)
+	}
+	if !end.IsZero() {
+		conditions = append(conditions, "start_time <= ?")
+		args = append(args, end)
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	var count int
+	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting recordings: %w", err)
+	}
+	return count, nil
 }
 
 // List returns recording segments with optional filtering and pagination.
@@ -163,18 +172,18 @@ func (r *Repository) List(ctx context.Context, cameraName string, start, end tim
 			&endStr, &rec.DurationS, &rec.SizeBytes, &createdStr); err != nil {
 			return nil, fmt.Errorf("scanning recording: %w", err)
 		}
-		startTime, err := parseSQLiteTime(startStr)
+		startTime, err := dbutil.ParseSQLiteTime(startStr)
 		if err != nil {
 			return nil, fmt.Errorf("scanning recording: invalid start_time %q: %w", startStr, err)
 		}
 		rec.StartTime = startTime
-		createdAt, err := parseSQLiteTime(createdStr)
+		createdAt, err := dbutil.ParseSQLiteTime(createdStr)
 		if err != nil {
 			return nil, fmt.Errorf("scanning recording: invalid created_at %q: %w", createdStr, err)
 		}
 		rec.CreatedAt = createdAt
 		if endStr != nil {
-			t, err := parseSQLiteTime(*endStr)
+			t, err := dbutil.ParseSQLiteTime(*endStr)
 			if err != nil {
 				return nil, fmt.Errorf("scanning recording: invalid end_time %q: %w", *endStr, err)
 			}
@@ -217,6 +226,115 @@ func (r *Repository) DeleteByCameraName(ctx context.Context, name string) (int64
 	return rows, nil
 }
 
+// ListOlderThan returns completed recordings whose start_time < cutoff and id > afterID,
+// ordered by id ascending, up to limit rows. Pass afterID=0 to start from the beginning.
+// Using id as a cursor (rather than OFFSET) ensures callers always make forward progress
+// even when records in a previous batch failed to be deleted or moved — preventing the
+// migrator/cleaner from re-querying the same failing rows indefinitely (R13/R14).
+func (r *Repository) ListOlderThan(ctx context.Context, cutoff time.Time, limit int, afterID int) ([]Record, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, camera_id, camera_name, path, start_time, end_time, duration_s, size_bytes, created_at
+		 FROM recordings
+		 WHERE start_time < ?
+		   AND id > ?
+		   AND end_time IS NOT NULL
+		 ORDER BY id ASC
+		 LIMIT ?`,
+		cutoff, afterID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing old recordings: %w", err)
+	}
+	defer rows.Close()
+
+	var recs []Record
+	for rows.Next() {
+		var rec Record
+		var startStr, createdStr string
+		var endStr *string
+		if err := rows.Scan(&rec.ID, &rec.CameraID, &rec.CameraName, &rec.Path, &startStr,
+			&endStr, &rec.DurationS, &rec.SizeBytes, &createdStr); err != nil {
+			return nil, fmt.Errorf("scanning old recording: %w", err)
+		}
+		startTime, err := dbutil.ParseSQLiteTime(startStr)
+		if err != nil {
+			return nil, fmt.Errorf("scanning old recording: invalid start_time %q: %w", startStr, err)
+		}
+		rec.StartTime = startTime
+		createdAt, err := dbutil.ParseSQLiteTime(createdStr)
+		if err != nil {
+			return nil, fmt.Errorf("scanning old recording: invalid created_at %q: %w", createdStr, err)
+		}
+		rec.CreatedAt = createdAt
+		if endStr != nil {
+			t, err := dbutil.ParseSQLiteTime(*endStr)
+			if err != nil {
+				return nil, fmt.Errorf("scanning old recording: invalid end_time %q: %w", *endStr, err)
+			}
+			rec.EndTime = &t
+		}
+		recs = append(recs, rec)
+	}
+	return recs, rows.Err()
+}
+
+// UpdatePath rewrites the filesystem path for a recording after hot→cold migration.
+// Does NOT move the file — the caller handles the rename. Returns ErrNotFound if
+// the ID no longer exists (race with concurrent delete is safe to ignore).
+func (r *Repository) UpdatePath(ctx context.Context, id int, newPath string) error {
+	result, err := r.db.ExecContext(ctx,
+		`UPDATE recordings SET path = ? WHERE id = ?`, newPath, id)
+	if err != nil {
+		return fmt.Errorf("updating recording path: %w", err)
+	}
+	affected, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		return fmt.Errorf("checking rows affected for recording path update: %w", rowsErr)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// StorageSummary holds aggregate byte-count and segment-count for one storage tier (Phase 10, R13).
+type StorageSummary struct {
+	UsedBytes    int64 `json:"used_bytes"`
+	SegmentCount int   `json:"segment_count"`
+}
+
+// StorageStats returns aggregate used_bytes and segment_count for the hot and cold
+// storage tiers, identified by path prefix. Cross-platform — no syscall needed.
+// cold is zero-value when coldPath is empty (cold storage not configured).
+func (r *Repository) StorageStats(ctx context.Context, hotPath, coldPath string) (hot, cold StorageSummary, err error) {
+	scanSummary := func(prefix string, out *StorageSummary) error {
+		if prefix == "" {
+			return nil
+		}
+		// Ensure trailing slash so LIKE 'prefix/%' never matches a sibling directory
+		// whose name starts with the same prefix (e.g. /media/hot2 vs /media/hot).
+		if prefix[len(prefix)-1] != '/' {
+			prefix += "/"
+		}
+		// Escape LIKE special characters in the prefix itself — storage paths rarely
+		// contain % or _ but if they do the pattern must not act as wildcards (R13/R14).
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+		return r.db.QueryRowContext(ctx,
+			`SELECT COALESCE(SUM(size_bytes), 0), COUNT(*)
+			 FROM recordings
+			 WHERE path LIKE ? ESCAPE '\'`,
+			escaped+"%",
+		).Scan(&out.UsedBytes, &out.SegmentCount)
+	}
+	if err = scanSummary(hotPath, &hot); err != nil {
+		return hot, cold, fmt.Errorf("hot storage stats: %w", err)
+	}
+	if err = scanSummary(coldPath, &cold); err != nil {
+		return hot, cold, fmt.Errorf("cold storage stats: %w", err)
+	}
+	return hot, cold, nil
+}
+
 // ExistsForCameraAtTime reports whether a completed recording segment for cameraID spans time t
 // (start_time <= t < end_time). Used by persistEvents to set has_clip on detection events (Phase 6).
 //
@@ -243,12 +361,6 @@ func (r *Repository) ExistsForCameraAtTime(ctx context.Context, cameraID int, t 
 	return exists, nil
 }
 
-// Count returns the total number of recording segments.
-func (r *Repository) Count(ctx context.Context) (int, error) {
-	var count int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM recordings`).Scan(&count)
-	return count, err
-}
 
 // TimelineSegment is a recording segment projected for timeline rendering (R6).
 // Omits path for security — the frontend uses /recordings/:id/play for playback.
@@ -294,12 +406,12 @@ func (r *Repository) TimelineForDay(ctx context.Context, cameraName string, date
 		if err := rows.Scan(&seg.ID, &startStr, &endStr, &seg.DurationS); err != nil {
 			return nil, fmt.Errorf("scanning timeline segment: %w", err)
 		}
-		startTime, err := parseSQLiteTime(startStr)
+		startTime, err := dbutil.ParseSQLiteTime(startStr)
 		if err != nil {
 			return nil, fmt.Errorf("scanning timeline segment: invalid start_time %q: %w", startStr, err)
 		}
 		seg.StartTime = startTime
-		endTime, err := parseSQLiteTime(endStr)
+		endTime, err := dbutil.ParseSQLiteTime(endStr)
 		if err != nil {
 			return nil, fmt.Errorf("scanning timeline segment: invalid end_time %q: %w", endStr, err)
 		}
@@ -348,7 +460,7 @@ func (r *Repository) DaysWithRecordings(ctx context.Context, cameraName string, 
 		if err := rows.Scan(&startStr); err != nil {
 			return nil, fmt.Errorf("scanning recording day: %w", err)
 		}
-		t, err := parseSQLiteTime(startStr)
+		t, err := dbutil.ParseSQLiteTime(startStr)
 		if err != nil {
 			return nil, fmt.Errorf("scanning recording day: invalid start_time %q: %w", startStr, err)
 		}

@@ -101,19 +101,11 @@ func applyMigration(db *sql.DB, filename string, version int, logger *slog.Logge
 		return fmt.Errorf("reading migration %s: %w", filename, err)
 	}
 
-	// Split by semicolons and execute each statement individually.
-	// This avoids partial execution if the driver only runs the first
-	// statement in a multi-statement Exec call.
-	//
-	// LIMITATION: This naive splitter will break on SQL containing semicolons
-	// inside string literals or trigger bodies (BEGIN...END;). If you need
-	// triggers or complex seed data, use the "--;;--" delimiter convention
-	// or switch to a migration library like golang-migrate.
-	for _, stmt := range strings.Split(string(content), ";") {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
+	// Execute each statement individually to handle SQLite drivers that only
+	// run the first statement in a multi-statement Exec call.
+	// splitStatements handles semicolons inside single-quoted string literals
+	// and -- line comments, which the previous naive strings.Split broke on.
+	for _, stmt := range splitStatements(string(content)) {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("executing statement in migration %s: %w\nstatement: %s", filename, err, stmt)
 		}
@@ -132,4 +124,133 @@ func applyMigration(db *sql.DB, filename string, version int, logger *slog.Logge
 
 	logger.Info("applied migration", "version", version, "name", filename)
 	return nil
+}
+
+// splitStatements splits SQL content by semicolons, correctly handling:
+//   - Single-quoted string literals (with '' for escaped quotes)
+//   - Double-quoted identifiers (with "" for escaped quotes — SQLite ANSI mode)
+//   - Line comments (-- to end of line)
+//   - Block comments (/* ... */ — may span multiple lines)
+//
+// Only splits on ';' when outside all four contexts, so semicolons inside
+// quoted values, identifier names, or comments do not create spurious
+// statement boundaries.
+// Each returned statement is whitespace-trimmed; empty statements are omitted.
+func splitStatements(content string) []string {
+	var stmts []string
+	var cur strings.Builder
+	inString := false      // inside single-quoted string literal ('...')
+	inDQIdent := false     // inside double-quoted identifier ("...")
+	inLineComment := false
+	inBlockComment := false
+	i := 0
+	for i < len(content) {
+		ch := content[i]
+
+		// Inside a block comment: copy verbatim until */
+		if inBlockComment {
+			cur.WriteByte(ch)
+			if ch == '*' && i+1 < len(content) && content[i+1] == '/' {
+				cur.WriteByte(content[i+1])
+				i += 2
+				inBlockComment = false
+			} else {
+				i++
+			}
+			continue
+		}
+
+		// Inside a line comment: copy verbatim until end of line.
+		if inLineComment {
+			cur.WriteByte(ch)
+			if ch == '\n' {
+				inLineComment = false
+			}
+			i++
+			continue
+		}
+
+		// Inside a single-quoted string: copy verbatim; handle '' escape.
+		if inString {
+			cur.WriteByte(ch)
+			if ch == '\'' {
+				if i+1 < len(content) && content[i+1] == '\'' {
+					i++ // skip the second ' of the '' pair
+					cur.WriteByte(content[i])
+				} else {
+					inString = false
+				}
+			}
+			i++
+			continue
+		}
+
+		// Inside a double-quoted identifier: copy verbatim; handle "" escape.
+		if inDQIdent {
+			cur.WriteByte(ch)
+			if ch == '"' {
+				if i+1 < len(content) && content[i+1] == '"' {
+					i++ // skip the second " of the "" pair
+					cur.WriteByte(content[i])
+				} else {
+					inDQIdent = false
+				}
+			}
+			i++
+			continue
+		}
+
+		// Detect block comment start (/*)
+		if ch == '/' && i+1 < len(content) && content[i+1] == '*' {
+			inBlockComment = true
+			cur.WriteByte(ch)
+			cur.WriteByte(content[i+1])
+			i += 2
+			continue
+		}
+
+		// Detect line comment start (--)
+		if ch == '-' && i+1 < len(content) && content[i+1] == '-' {
+			inLineComment = true
+			cur.WriteByte(ch)
+			cur.WriteByte(content[i+1])
+			i += 2
+			continue
+		}
+
+		// Detect string literal start
+		if ch == '\'' {
+			inString = true
+			cur.WriteByte(ch)
+			i++
+			continue
+		}
+
+		// Detect double-quoted identifier start
+		if ch == '"' {
+			inDQIdent = true
+			cur.WriteByte(ch)
+			i++
+			continue
+		}
+
+		// Statement separator: emit the accumulated statement
+		if ch == ';' {
+			if stmt := strings.TrimSpace(cur.String()); stmt != "" {
+				stmts = append(stmts, stmt)
+			}
+			cur.Reset()
+			i++
+			continue
+		}
+
+		cur.WriteByte(ch)
+		i++
+	}
+
+	// Emit any trailing statement that has no terminating semicolon
+	if stmt := strings.TrimSpace(cur.String()); stmt != "" {
+		stmts = append(stmts, stmt)
+	}
+	return stmts
 }

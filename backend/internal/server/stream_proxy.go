@@ -155,12 +155,17 @@ func buildGo2rtcWSURL(apiBase, cameraName string) string {
 // accepted by nhooyr.io/websocket.AcceptOptions.OriginPatterns.
 // The library expects patterns like "localhost:5173" or "*.example.com"
 // (scheme is handled internally by comparing against the request's scheme).
-// Falls back to "*" (allow all) if no origins are configured — matches
-// the behaviour of InsecureSkipVerify for unconfigured/auth-disabled setups.
+//
+// When auth is enabled and AllowedOrigins is empty, returns an empty slice so
+// WebSocket upgrades are denied from all origins (deny-by-default, M-7, CG6).
+// When auth is disabled, falls back to "*" for the unauthenticated dev experience.
 func (s *Server) wsOriginPatterns() []string {
 	origins := s.cfg.Auth.AllowedOrigins
 	if len(origins) == 0 {
-		return []string{"*"}
+		if s.authService != nil {
+			return []string{} // auth enabled, no origins configured → deny all
+		}
+		return []string{"*"} // auth disabled → allow all (dev/unauthenticated mode)
 	}
 	patterns := make([]string, 0, len(origins))
 	for _, o := range origins {
@@ -168,11 +173,15 @@ func (s *Server) wsOriginPatterns() []string {
 		host := o
 		host = strings.TrimPrefix(host, "https://")
 		host = strings.TrimPrefix(host, "http://")
+		host = strings.TrimRight(host, "/") // strip trailing slashes (M-8)
 		if host != "" {
 			patterns = append(patterns, host)
 		}
 	}
 	if len(patterns) == 0 {
+		if s.authService != nil {
+			return []string{}
+		}
 		return []string{"*"}
 	}
 	return patterns

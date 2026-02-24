@@ -17,4 +17,7 @@ var (
 
 	// ErrTokenInvalid is returned when a JWT or refresh token fails validation.
 	ErrTokenInvalid = errors.New("token invalid")
+
+	// ErrSetupAlreadyDone is returned when POST /setup is called but users already exist.
+	ErrSetupAlreadyDone = errors.New("setup already completed")
 )

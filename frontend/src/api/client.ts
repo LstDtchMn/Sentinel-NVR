@@ -67,6 +67,7 @@ export interface CameraDetail {
   created_at: string;
   updated_at: string;
   pipeline_status: PipelineStatus | null;
+  zones: Zone[]; // Phase 9: detection zone polygons; backend always returns array (default [])
 }
 
 /** Request body for creating/updating a camera. */
@@ -81,6 +82,7 @@ export interface CameraInput {
   onvif_port?: number;
   onvif_user?: string;
   onvif_pass?: string;
+  zones?: Zone[]; // Phase 9: when omitted, server preserves existing zones
 }
 
 /** A single recording segment returned by the API. */
@@ -119,6 +121,25 @@ export interface BBox {
   y_min: number;
   x_max: number;
   y_max: number;
+}
+
+// --- Zone types (Phase 9, R5) ---
+
+/** Include: detections must be inside the zone. Exclude: detections inside are suppressed. */
+export type ZoneType = "include" | "exclude";
+
+/** A single polygon vertex, normalised to [0.0, 1.0] relative to frame dimensions. */
+export interface ZonePoint {
+  x: number;
+  y: number;
+}
+
+/** A named polygon region on a camera's field of view for detection zone filtering. */
+export interface Zone {
+  id: string;
+  name: string;
+  type: ZoneType;
+  points: ZonePoint[];
 }
 
 /** A single object detected in a frame. */
@@ -206,7 +227,7 @@ export interface SystemConfig {
   server: { host: string; port: number; log_level: string };
   storage: {
     hot_path: string;             // fast storage (SSD) — recent recordings
-    cold_path: string;            // archival storage (HDD/NAS)
+    cold_path?: string;           // archival storage (HDD/NAS) — absent when not configured
     hot_retention_days: number;
     cold_retention_days: number;
     segment_duration: number;
@@ -219,6 +240,68 @@ export interface SystemConfig {
     record: boolean;
     detect: boolean;
   }>;
+}
+
+// --- Face Recognition types (Phase 13, R11) ---
+
+/** An enrolled face identity for recognition matching. */
+export interface FaceRecord {
+  id: number;
+  name: string;
+  thumbnail: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// --- Migration / Import types (Phase 14, R15) ---
+
+/** A camera parsed from an external NVR config file during import preview. */
+export interface ImportedCamera {
+  name: string;
+  enabled: boolean;
+  main_stream: string;
+  sub_stream: string;
+  record: boolean;
+  detect: boolean;
+  onvif_host?: string;
+  onvif_port?: number;
+  onvif_user?: string;
+  // onvif_pass excluded — backend uses json:"-" to prevent credential leakage in previews
+}
+
+/** Result of a dry-run import preview (POST /import/preview). */
+export interface ImportResult {
+  format: string;
+  cameras: ImportedCamera[];
+  warnings: string[];
+  errors: string[];
+}
+
+/** Result of an actual import execution (POST /import). */
+export interface ImportExecuteResult {
+  imported: number;
+  skipped: number;
+  errors: string[];
+  warnings: string[];
+}
+
+/** Pairing code returned by POST /pairing/qr (Phase 12, CG11). */
+export interface PairingCode {
+  code: string;
+  expires_at: string; // RFC3339
+}
+
+/** Per-tier storage usage returned by GET /api/v1/storage/stats (Phase 10, R13). */
+export interface StorageTierStats {
+  path: string;
+  used_bytes: number;
+  segment_count: number;
+}
+
+/** Aggregate storage stats for hot and (optionally) cold tiers (Phase 10, R13). */
+export interface StorageStats {
+  hot: StorageTierStats;
+  cold: StorageTierStats | null;
 }
 
 /**
@@ -324,6 +407,13 @@ class ApiClient {
     return this.request<PipelineStatus>(`/cameras/${encodeURIComponent(name)}/status`, { signal });
   }
 
+  /** Returns a URL that fetches a single JPEG snapshot from the camera's go2rtc stream.
+   *  Used as the background image for the zone editor (Phase 9). The server grabs a
+   *  live frame — append a cache-busting parameter to force a fresh fetch each call. */
+  cameraSnapshotURL(name: string): string {
+    return `${API_BASE}/cameras/${encodeURIComponent(name)}/snapshot`;
+  }
+
   createCamera(input: CameraInput, signal?: AbortSignal): Promise<CameraDetail> {
     return this.request<CameraDetail>("/cameras", {
       method: "POST",
@@ -353,7 +443,31 @@ class ApiClient {
     return this.request<SystemConfig>("/config", { signal });
   }
 
-  getRecordings(params?: RecordingListParams, signal?: AbortSignal): Promise<RecordingSegment[]> {
+  /** Returns aggregate storage usage per tier (Phase 10, R13). */
+  getStorageStats(signal?: AbortSignal): Promise<StorageStats> {
+    return this.request<StorageStats>("/storage/stats", { signal });
+  }
+
+  /** Updates non-sensitive config fields and persists to disk (admin only). Phase 9. */
+  updateConfig(
+    input: {
+      server?: { log_level?: string };
+      storage?: { hot_retention_days?: number; cold_retention_days?: number; segment_duration?: number };
+    },
+    signal?: AbortSignal,
+  ): Promise<SystemConfig> {
+    return this.request<SystemConfig>("/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal,
+    });
+  }
+
+  async getRecordings(
+    params?: RecordingListParams,
+    signal?: AbortSignal,
+  ): Promise<{ recordings: RecordingSegment[]; total: number }> {
     const query = new URLSearchParams();
     if (params?.camera) query.set("camera", params.camera);
     if (params?.start) query.set("start", params.start);
@@ -361,7 +475,11 @@ class ApiClient {
     if (params?.limit !== undefined) query.set("limit", String(params.limit));
     if (params?.offset !== undefined) query.set("offset", String(params.offset));
     const qs = query.toString();
-    return this.request<RecordingSegment[]>(`/recordings${qs ? `?${qs}` : ""}`, { signal });
+    // Backend returns {"recordings":[...],"total":N} — unwrap into typed response.
+    return this.request<{ recordings: RecordingSegment[]; total: number }>(
+      `/recordings${qs ? `?${qs}` : ""}`,
+      { signal },
+    );
   }
 
   getRecording(id: number, signal?: AbortSignal): Promise<RecordingSegment> {
@@ -453,6 +571,24 @@ class ApiClient {
     return this.request<AuthUser>("/auth/me", { signal });
   }
 
+  /** Checks if first-run setup is needed (no users exist yet). Public endpoint (Phase 7, CG6). */
+  checkSetup(signal?: AbortSignal): Promise<{ needs_setup: boolean; oidc_enabled: boolean }> {
+    return this.request<{ needs_setup: boolean; oidc_enabled: boolean }>("/setup", { signal });
+  }
+
+  /**
+   * Creates the first admin account during first-run setup and sets auth cookies.
+   * Returns the created user. Throws 409 if setup was already completed (Phase 7, CG6).
+   */
+  completeSetup(username: string, password: string, signal?: AbortSignal): Promise<{ user: AuthUser }> {
+    return this.request<{ user: AuthUser }>("/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+      signal,
+    });
+  }
+
   /**
    * Opens a Server-Sent Events connection to receive live event notifications (Phase 6, CG8).
    * The caller must close the returned EventSource on component unmount:
@@ -521,6 +657,128 @@ class ApiClient {
   listNotifLog(limit?: number, signal?: AbortSignal): Promise<NotifLogEntry[]> {
     const qs = limit ? `?limit=${limit}` : "";
     return this.request<NotifLogEntry[]>(`/notifications/log${qs}`, { signal });
+  }
+
+  // --- Remote Access / Pairing (Phase 12, CG11) ---
+
+  /** Generates a new pairing code for QR-based mobile app pairing (admin only). */
+  generatePairingCode(signal?: AbortSignal): Promise<PairingCode> {
+    return this.request<PairingCode>("/pairing/qr", {
+      method: "POST",
+      signal,
+    });
+  }
+
+  // --- Face Recognition (Phase 13, R11) ---
+
+  /** Returns all enrolled faces (without embeddings). */
+  listFaces(signal?: AbortSignal): Promise<FaceRecord[]> {
+    return this.request<{ faces: FaceRecord[] }>("/faces", { signal }).then((r) => r.faces);
+  }
+
+  /** Returns a single enrolled face by ID. */
+  getFace(id: number, signal?: AbortSignal): Promise<FaceRecord> {
+    return this.request<FaceRecord>(`/faces/${id}`, { signal });
+  }
+
+  /** Enrolls a new face with a name and pre-computed embedding (admin only). */
+  createFace(
+    input: { name: string; embedding: number[] },
+    signal?: AbortSignal,
+  ): Promise<FaceRecord> {
+    return this.request<FaceRecord>("/faces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal,
+    });
+  }
+
+  /** Renames an enrolled face (admin only). Returns the updated record. */
+  updateFace(id: number, name: string, signal?: AbortSignal): Promise<FaceRecord> {
+    return this.request<FaceRecord>(`/faces/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+      signal,
+    });
+  }
+
+  /** Deletes an enrolled face (admin only). */
+  async deleteFace(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/faces/${id}`, { method: "DELETE", signal });
+  }
+
+  // --- Migration / Import (Phase 14, R15) ---
+
+  /**
+   * Dry-run import: parses an uploaded config file and returns a preview of cameras
+   * that would be imported (admin only).
+   */
+  async importPreview(
+    format: "blue_iris" | "frigate",
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<ImportResult> {
+    const formData = new FormData();
+    formData.append("format", format);
+    formData.append("file", file);
+    // Use raw fetch because FormData sets its own Content-Type with boundary.
+    const timeoutCtrl = new AbortController();
+    const timeoutId = setTimeout(() => timeoutCtrl.abort(), 30_000);
+    const sig = signal
+      ? combineSignals(signal, timeoutCtrl.signal)
+      : timeoutCtrl.signal;
+    try {
+      const resp = await fetch(`${API_BASE}/import/preview`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+        signal: sig,
+      });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        throw new Error(`API error ${resp.status}: ${detail}`);
+      }
+      return (await resp.json()) as ImportResult;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /** Executes the import — creates cameras from the uploaded file (admin only). */
+  async importExecute(
+    format: "blue_iris" | "frigate",
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<ImportExecuteResult> {
+    const formData = new FormData();
+    formData.append("format", format);
+    formData.append("file", file);
+    const timeoutCtrl = new AbortController();
+    const timeoutId = setTimeout(() => timeoutCtrl.abort(), 60_000);
+    const sig = signal
+      ? combineSignals(signal, timeoutCtrl.signal)
+      : timeoutCtrl.signal;
+    try {
+      const resp = await fetch(`${API_BASE}/import`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+        signal: sig,
+      });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        throw new Error(`API error ${resp.status}: ${detail}`);
+      }
+      return (await resp.json()) as ImportExecuteResult;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 }
 

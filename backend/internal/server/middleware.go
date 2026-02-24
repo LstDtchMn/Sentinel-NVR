@@ -3,7 +3,6 @@
 package server
 
 import (
-	"net/http"
 	"sync"
 	"time"
 
@@ -18,6 +17,7 @@ type loginRateLimiter struct {
 	attempts    map[string]*ipAttempts
 	maxAttempts int
 	window      time.Duration
+	stopCh      chan struct{} // signals the background cleanup goroutine to exit
 }
 
 type ipAttempts struct {
@@ -26,11 +26,39 @@ type ipAttempts struct {
 }
 
 func newLoginRateLimiter(maxAttempts int, window time.Duration) *loginRateLimiter {
-	return &loginRateLimiter{
+	rl := &loginRateLimiter{
 		attempts:    make(map[string]*ipAttempts),
 		maxAttempts: maxAttempts,
 		window:      window,
+		stopCh:      make(chan struct{}),
 	}
+	// Background cleanup: prune entries whose window has expired to prevent
+	// unbounded map growth when serving many distinct IP addresses (CG6).
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				rl.mu.Lock()
+				now := time.Now()
+				for ip, a := range rl.attempts {
+					if now.After(a.resetAt) {
+						delete(rl.attempts, ip)
+					}
+				}
+				rl.mu.Unlock()
+			case <-rl.stopCh:
+				return
+			}
+		}
+	}()
+	return rl
+}
+
+// stopCleanup stops the background cleanup goroutine. Called from Server.Shutdown.
+func (rl *loginRateLimiter) stopCleanup() {
+	close(rl.stopCh)
 }
 
 // allow returns true if the IP has not exceeded the rate limit.

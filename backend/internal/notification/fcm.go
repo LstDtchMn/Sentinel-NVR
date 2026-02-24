@@ -209,6 +209,8 @@ func (f *FCMSender) getAccessToken(ctx context.Context) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
 		return "", fmt.Errorf("decode token response: %w", err)
 	}
+	// Drain any unread bytes so the HTTP keep-alive connection can be reused.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	if tokenResp.AccessToken == "" {
 		return "", fmt.Errorf("empty access_token in response")
 	}

@@ -2,7 +2,7 @@ package auth
 
 import (
 	"errors"
-	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -86,12 +86,13 @@ func writeAuthCookie(c *gin.Context, name, value string, maxAge int, secure bool
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode, // protects POST/DELETE from CSRF while allowing GET SSE
 	}
-	// Validate before writing — SameSite=Lax + empty domain = host-only cookie.
+	// Validate before writing. Our token values are hex/base64-encoded (safe characters)
+	// and the name/path are fixed constants, so this should never fail in practice.
+	// Fail closed: skip the cookie rather than falling back to one without SameSite
+	// protection, which would degrade CSRF security silently.
 	if err := cookie.Valid(); err != nil {
-		// Defensive: fall back to Gin's SetCookie (no SameSite), but log so the
-		// operator can see that the SameSite guard was bypassed.
-		fmt.Printf("auth: cookie validation failed, falling back to SetCookie: %v\n", err)
-		c.SetCookie(name, value, maxAge, "/", "", secure, true)
+		slog.Default().Error("auth: refusing to write invalid cookie; this is a bug",
+			"name", name, "error", err)
 		return
 	}
 	http.SetCookie(c.Writer, cookie)

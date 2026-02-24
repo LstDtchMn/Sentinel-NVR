@@ -22,6 +22,7 @@ type Config struct {
 	Go2RTC        Go2RTCConfig       `yaml:"go2rtc"`
 	Cameras       []CameraConfig     `yaml:"cameras"`
 	Watchdog      WatchdogConfig     `yaml:"watchdog"`
+	Relay         RelayConfig        `yaml:"relay"`     // Phase 12: remote access via TURN relay (CG11, R8)
 }
 
 // NotificationConfig holds push notification provider settings (Phase 8, R9).
@@ -54,11 +55,36 @@ type APNsConfig struct {
 
 // AuthConfig controls local authentication and JWT session management (Phase 7, CG6).
 type AuthConfig struct {
-	Enabled          bool   `yaml:"enabled"`           // default true; set false to disable auth (dev/trusted-LAN only)
-	AccessTokenTTL   int    `yaml:"access_token_ttl"`  // seconds; default 900 (15 min)
-	RefreshTokenTTL  int    `yaml:"refresh_token_ttl"` // seconds; default 604800 (7 days)
-	SecureCookie     bool   `yaml:"secure_cookie"`     // set Secure flag on cookies; enable when running HTTPS
-	AllowedOrigins   []string `yaml:"allowed_origins"` // CORS origins for cookie-based auth; default ["http://localhost:5173"]
+	Enabled         bool       `yaml:"enabled"`           // default true; set false to disable auth (dev/trusted-LAN only)
+	AccessTokenTTL  int        `yaml:"access_token_ttl"`  // seconds; default 900 (15 min)
+	RefreshTokenTTL int        `yaml:"refresh_token_ttl"` // seconds; default 604800 (7 days)
+	SecureCookie    bool       `yaml:"secure_cookie"`     // set Secure flag on cookies; enable when running HTTPS
+	AllowedOrigins  []string   `yaml:"allowed_origins"`   // CORS origins for cookie-based auth; default ["http://localhost:5173"]
+	OIDC            OIDCConfig `yaml:"oidc"`              // Phase 7: optional SSO via OpenID Connect (CG6)
+}
+
+// OIDCConfig holds OpenID Connect provider settings for SSO login (Phase 7, CG6).
+// When Enabled is true, users may log in via the /api/v1/auth/oidc/login flow.
+// The provider must expose a discovery document at ProviderURL + "/.well-known/openid-configuration".
+type OIDCConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	ProviderURL  string `yaml:"provider_url"`  // e.g. "https://accounts.google.com"
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	RedirectURL  string `yaml:"redirect_url"` // must match a URI registered with the provider
+}
+
+// RelayConfig holds TURN/STUN relay settings for remote mobile access (Phase 12, CG11, R8).
+// When Enabled is true, the /relay/ice-servers endpoint returns TURN credentials to
+// the mobile app so it can establish WebRTC connections through NAT.
+// IMPORTANT: TURNServer/TURNUser/TURNPass must match go2rtc.yaml's webrtc.ice_servers
+// config — both peers need to use the same TURN relay.
+type RelayConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	STUNServer string `yaml:"stun_server"` // e.g. "stun:stun.l.google.com:19302"
+	TURNServer string `yaml:"turn_server"` // e.g. "turn:coturn:3478"
+	TURNUser   string `yaml:"turn_user"`
+	TURNPass   string `yaml:"turn_pass"`
 }
 
 // Go2RTCConfig holds connection settings for the go2rtc sidecar (CG3).
@@ -102,6 +128,32 @@ type DetectionConfig struct {
 	Model               string   `yaml:"model"`
 	GPUDevice           string   `yaml:"gpu_device"`
 	ConfidenceThreshold *float64 `yaml:"confidence_threshold"` // pointer to distinguish unset from 0.0
+	InferencePort       int      `yaml:"inference_port"`     // Phase 9: port sentinel-infer HTTP server binds to; default 9099
+	InferenceBinary     string   `yaml:"inference_binary"`   // Phase 9: path to sentinel-infer binary; empty = auto-resolve
+
+	// Phase 13: Advanced AI (R11, R12)
+	FaceRecognition     FaceRecognitionConfig     `yaml:"face_recognition"`
+	AudioClassification AudioClassificationConfig `yaml:"audio_classification"`
+}
+
+// FaceRecognitionConfig holds settings for opt-in face recognition (Phase 13, R11).
+// When enabled, detected "person" events trigger a secondary face detection + embedding
+// pass against the enrolled faces database. Matches publish "face_match" events.
+type FaceRecognitionConfig struct {
+	Enabled          bool    `yaml:"enabled"`
+	Model            string  `yaml:"model"`             // path to ArcFace ONNX model; default auto-resolved
+	MatchThreshold   float64 `yaml:"match_threshold"`   // cosine similarity threshold [0.0-1.0]; default 0.6
+	MaxFacesPerFrame int     `yaml:"max_faces_per_frame"` // limit face crops per frame; default 5
+}
+
+// AudioClassificationConfig holds settings for audio event detection (Phase 13, R12).
+// When enabled, an ffmpeg process extracts audio from each camera's stream and runs
+// classification via a YAMNet-compatible model to detect glass break, dog bark, baby cry.
+type AudioClassificationConfig struct {
+	Enabled            bool    `yaml:"enabled"`
+	Model              string  `yaml:"model"`              // path to YAMNet ONNX model; default auto-resolved
+	ConfidenceThreshold float64 `yaml:"confidence_threshold"` // minimum score to publish event; default 0.7
+	SampleInterval     int     `yaml:"sample_interval"`    // seconds between audio samples per camera; default 3
 }
 
 // CameraConfig defines a single camera's RTSP streams and behavior (R1, R2).
@@ -175,14 +227,18 @@ func Validate(cfg *Config) error {
 	if !filepath.IsAbs(cfg.Storage.HotPath) {
 		return fmt.Errorf("storage.hot_path must be an absolute path, got %q", cfg.Storage.HotPath)
 	}
-	if !filepath.IsAbs(cfg.Storage.ColdPath) {
+	if cfg.Storage.ColdPath != "" && !filepath.IsAbs(cfg.Storage.ColdPath) {
 		return fmt.Errorf("storage.cold_path must be an absolute path, got %q", cfg.Storage.ColdPath)
 	}
 	if cfg.Storage.HotRetentionDays < 1 {
 		return fmt.Errorf("storage.hot_retention_days must be >= 1, got %d", cfg.Storage.HotRetentionDays)
 	}
-	if cfg.Storage.ColdRetentionDays < 1 {
+	if cfg.Storage.ColdPath != "" && cfg.Storage.ColdRetentionDays < 1 {
 		return fmt.Errorf("storage.cold_retention_days must be >= 1, got %d", cfg.Storage.ColdRetentionDays)
+	}
+
+	if cfg.Storage.SegmentFormat != "" && cfg.Storage.SegmentFormat != "mp4" {
+		return fmt.Errorf("storage.segment_format %q is not supported (only \"mp4\" is tested)", cfg.Storage.SegmentFormat)
 	}
 
 	// Validate confidence threshold is within the model output range [0.0, 1.0].
@@ -234,6 +290,26 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	// Validate Phase 13 sub-feature thresholds (R11, R12).
+	if cfg.Detection.FaceRecognition.Enabled {
+		t := cfg.Detection.FaceRecognition.MatchThreshold
+		if t < 0.0 || t > 1.0 {
+			return fmt.Errorf("detection.face_recognition.match_threshold %g is out of range [0.0, 1.0]", t)
+		}
+		if cfg.Detection.FaceRecognition.MaxFacesPerFrame < 1 {
+			return fmt.Errorf("detection.face_recognition.max_faces_per_frame must be >= 1")
+		}
+	}
+	if cfg.Detection.AudioClassification.Enabled {
+		t := cfg.Detection.AudioClassification.ConfidenceThreshold
+		if t < 0.0 || t > 1.0 {
+			return fmt.Errorf("detection.audio_classification.confidence_threshold %g is out of range [0.0, 1.0]", t)
+		}
+		if cfg.Detection.AudioClassification.SampleInterval < 1 {
+			return fmt.Errorf("detection.audio_classification.sample_interval must be >= 1")
+		}
+	}
+
 	// Validate watchdog intervals — time.NewTicker panics on non-positive duration.
 	if cfg.Watchdog.Enabled {
 		if cfg.Watchdog.HealthInterval <= 0 {
@@ -251,6 +327,20 @@ func Validate(cfg *Config) error {
 	}
 	if err := validateURL(cfg.Go2RTC.RTSPURL, "go2rtc.rtsp_url"); err != nil {
 		return err
+	}
+
+	// Validate relay config when enabled (Phase 12, CG11).
+	// Catches misconfigured TURN credentials at startup before they silently break WebRTC.
+	if cfg.Relay.Enabled {
+		if cfg.Relay.TURNServer == "" {
+			return fmt.Errorf("relay.turn_server is required when relay.enabled=true")
+		}
+		if cfg.Relay.TURNUser == "" {
+			return fmt.Errorf("relay.turn_user is required when relay.enabled=true")
+		}
+		if cfg.Relay.TURNPass == "" || cfg.Relay.TURNPass == "changeme" {
+			return fmt.Errorf("relay.turn_pass must be set to a non-default value when relay.enabled=true")
+		}
 	}
 
 	// Check for duplicate camera names — duplicates silently overwrite in the manager map
@@ -272,14 +362,23 @@ func Validate(cfg *Config) error {
 	return nil
 }
 
-// Save writes the current configuration back to a YAML file.
-// Used by the Web UI when users change settings visually.
+// Save writes the current configuration back to a YAML file atomically.
+// Writes to a temporary file first, then renames to prevent config corruption
+// if the process is killed or the system loses power during the write.
 func Save(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return os.WriteFile(path, data, 0600)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("writing temp config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp) // best-effort cleanup
+		return fmt.Errorf("replacing config file: %w", err)
+	}
+	return nil
 }
 
 // ConfidenceThreshold returns the effective detection confidence threshold,
@@ -324,13 +423,10 @@ func setDefaults(cfg *Config) {
 	if cfg.Storage.HotPath == "" {
 		cfg.Storage.HotPath = "/media/hot"
 	}
-	if cfg.Storage.ColdPath == "" {
-		cfg.Storage.ColdPath = "/media/cold"
-	}
 	if cfg.Storage.HotRetentionDays == 0 {
 		cfg.Storage.HotRetentionDays = 3
 	}
-	if cfg.Storage.ColdRetentionDays == 0 {
+	if cfg.Storage.ColdPath != "" && cfg.Storage.ColdRetentionDays == 0 {
 		cfg.Storage.ColdRetentionDays = 30
 	}
 	if cfg.Storage.SegmentDuration == 0 {
@@ -345,7 +441,7 @@ func setDefaults(cfg *Config) {
 		cfg.Database.Path = "/data/sentinel.db"
 	}
 	if cfg.Detection.Backend == "" {
-		cfg.Detection.Backend = "openvino"
+		cfg.Detection.Backend = "remote"
 	}
 	if cfg.Detection.RemoteURL == "" {
 		cfg.Detection.RemoteURL = "http://codeproject-ai:32168"
@@ -361,6 +457,29 @@ func setDefaults(cfg *Config) {
 	}
 	// ConfidenceThreshold default is handled by ConfidenceThresholdValue() method
 	// instead of overwriting 0.0 (which is a valid intentional value).
+	if cfg.Detection.InferencePort == 0 {
+		cfg.Detection.InferencePort = 9099 // sentinel-infer HTTP server default port
+	}
+	if cfg.Detection.InferenceBinary == "" {
+		cfg.Detection.InferenceBinary = "/usr/local/bin/sentinel-infer"
+	}
+
+	// Phase 13: Face recognition defaults (R11)
+	if cfg.Detection.FaceRecognition.MatchThreshold == 0 {
+		cfg.Detection.FaceRecognition.MatchThreshold = 0.6
+	}
+	if cfg.Detection.FaceRecognition.MaxFacesPerFrame == 0 {
+		cfg.Detection.FaceRecognition.MaxFacesPerFrame = 5
+	}
+
+	// Phase 13: Audio classification defaults (R12)
+	if cfg.Detection.AudioClassification.ConfidenceThreshold == 0 {
+		cfg.Detection.AudioClassification.ConfidenceThreshold = 0.7
+	}
+	if cfg.Detection.AudioClassification.SampleInterval == 0 {
+		cfg.Detection.AudioClassification.SampleInterval = 3
+	}
+
 	// Auth defaults (Phase 7, CG6). Enabled is not defaulted here — it mirrors
 	// the pattern of WatchdogConfig.Enabled and DetectionConfig.Enabled (explicit
 	// opt-in). Set auth.enabled: true in sentinel.yml to activate authentication.
@@ -397,5 +516,10 @@ func setDefaults(cfg *Config) {
 	// Notification defaults (Phase 8, R9)
 	if cfg.Notifications.RetryInterval == 0 {
 		cfg.Notifications.RetryInterval = 60 // re-check pending deliveries every minute
+	}
+
+	// Relay defaults (Phase 12, CG11)
+	if cfg.Relay.STUNServer == "" {
+		cfg.Relay.STUNServer = "stun:stun.l.google.com:19302"
 	}
 }

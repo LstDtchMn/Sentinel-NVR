@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
@@ -21,8 +22,10 @@ type Service struct {
 	bus       *eventbus.Bus
 	logger    *slog.Logger
 	done      chan struct{}
+	stopCh    chan struct{} // closed by Stop() to force run() exit independently of bus.Close()
 	wg        sync.WaitGroup // tracks all goroutines (run + recoverPending)
 	startOnce sync.Once      // prevents double-Start
+	started   atomic.Bool    // true after Start() has launched goroutines
 }
 
 // NewService creates a notification service.
@@ -35,6 +38,7 @@ func NewService(repo *Repository, senders map[string]Sender, bus *eventbus.Bus, 
 		bus:     bus,
 		logger:  logger.With("component", "notification"),
 		done:    make(chan struct{}),
+		stopCh:  make(chan struct{}),
 	}
 }
 
@@ -59,29 +63,66 @@ func (s *Service) Start() {
 			defer s.wg.Done()
 			s.run()
 		}()
+		// Set started AFTER goroutine launch so Stop() won't block on
+		// <-s.done before run() has been scheduled.
+		s.started.Store(true)
 	})
 }
 
-// Stop waits for all internal goroutines to exit after the bus closes.
-// Both run() (exits when bus channel drains) and recoverPending() (bounded
-// by its own 2-minute context) must finish before Stop() returns.
+// Stop signals run() to exit (via stopCh) and waits for all goroutines to finish.
+// Safe to call whether or not the event bus has been closed first.
 func (s *Service) Stop() {
-	<-s.done // wait for run() to signal bus drained
+	select {
+	case <-s.stopCh:
+		// already stopped
+	default:
+		close(s.stopCh)
+	}
+	if s.started.Load() {
+		<-s.done // wait for run() to acknowledge stopCh
+	}
 	s.wg.Wait()
 }
 
 // run subscribes to all bus events and dispatches notifications for each.
+// Exits when either the bus channel closes (normal shutdown) or stopCh is closed
+// (Stop() called before bus.Close() — prevents deadlock).
 func (s *Service) run() {
 	defer close(s.done)
 
 	ch := s.bus.Subscribe("*")
-	for event := range ch {
-		// Skip internal events that are not user-facing.
-		switch event.Type {
-		case "events.persisted", "recording.segment_complete":
-			continue
+	for {
+		select {
+		case <-s.stopCh:
+			s.bus.Unsubscribe(ch)
+			return
+		case event, ok := <-ch:
+			if !ok {
+				return // bus closed
+			}
+			// Route events: detection is handled via events.persisted to obtain
+			// the DB-assigned EventID for deep links; other user-facing events are
+			// handled directly from the raw event.
+			switch event.Type {
+			case "recording.segment_complete":
+				continue // not user-facing
+			case "detection":
+				continue // handled below via events.persisted with DB EventID
+			case "events.persisted":
+				// Unwrap to the original event type so MatchingPrefs uses the
+				// correct type (e.g. "detection"), and carry the EventID for the
+				// notification log deep link. Only dispatch for detection events —
+				// other types are already handled from their raw event above.
+				if data, ok := event.Data.(map[string]any); ok {
+					if origType, _ := data["type"].(string); origType == "detection" {
+						event.Type = origType
+						s.handleEvent(event) // event.EventID is the DB-assigned id
+					}
+				}
+				continue
+			}
+			s.handleEvent(event)
 		}
-		s.handleEvent(event)
 	}
 }
 
@@ -225,9 +266,11 @@ func (s *Service) recoverPending() {
 // buildNotification constructs a Notification from a raw eventbus.Event.
 // Human-readable title/body are derived from the event type and metadata.
 func buildNotification(event eventbus.Event) Notification {
-	cameraName := event.Label // fallback
-	if event.Type == "detection" {
-		cameraName = "" // will be filled from camera name in future phases
+	// CameraName is set by the camera pipeline when publishing events (Phase 8, M-10).
+	// Fall back to Label only for legacy/non-camera events that lack CameraName.
+	cameraName := event.CameraName
+	if cameraName == "" {
+		cameraName = event.Label
 	}
 
 	var title, body string
@@ -256,6 +299,7 @@ func buildNotification(event eventbus.Event) Notification {
 
 	return Notification{
 		EventType:  event.Type,
+		EventID:    event.EventID, // non-zero for detection events (set via events.persisted)
 		Title:      title,
 		Body:       body,
 		Thumbnail:  event.Thumbnail,

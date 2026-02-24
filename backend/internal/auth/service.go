@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -133,6 +135,11 @@ func (s *Service) ValidateAccessToken(tokenStr string) (*Claims, error) {
 	if !ok || !token.Valid {
 		return nil, ErrTokenInvalid
 	}
+	// Cross-validate: Subject must equal the UserID custom claim.
+	// Prevents a crafted token from smuggling a different user's ID.
+	if strconv.Itoa(claims.UserID) != claims.Subject {
+		return nil, ErrTokenInvalid
+	}
 	return claims, nil
 }
 
@@ -147,6 +154,80 @@ func (s *Service) EncryptCredential(plaintext string) (string, error) {
 // Values not prefixed with "enc:" are returned unchanged (plaintext compat).
 func (s *Service) DecryptCredential(ciphertext string) (string, error) {
 	return DecryptCredential(ciphertext, s.encKey)
+}
+
+// NeedsSetup reports whether first-run setup is required (no user accounts exist yet).
+func (s *Service) NeedsSetup(ctx context.Context) (bool, error) {
+	count, err := s.repo.CountUsers(ctx)
+	if err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+// Setup creates the first admin account and issues a session token pair.
+// Returns ErrSetupAlreadyDone if any user accounts already exist.
+func (s *Service) Setup(ctx context.Context, username, password string) (*User, *TokenPair, error) {
+	count, err := s.repo.CountUsers(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("setup: %w", err)
+	}
+	if count > 0 {
+		return nil, nil, ErrSetupAlreadyDone
+	}
+
+	hash, err := HashPassword(password)
+	if err != nil {
+		return nil, nil, fmt.Errorf("setup: %w", err)
+	}
+	user, err := s.repo.CreateUser(ctx, username, hash, "admin")
+	if err != nil {
+		return nil, nil, fmt.Errorf("setup: creating user: %w", err)
+	}
+	pair, err := s.issueTokenPair(ctx, user)
+	if err != nil {
+		return nil, nil, fmt.Errorf("setup: issuing tokens: %w", err)
+	}
+	return user, pair, nil
+}
+
+// OIDCLoginOrCreate looks up the user by OIDC subject claim.
+// If no matching user exists, a new viewer account is created using the preferred
+// username or email local-part as the display name.
+// Returns a fresh token pair ready to be set as cookies.
+func (s *Service) OIDCLoginOrCreate(ctx context.Context, sub, username, email string) (*TokenPair, error) {
+	displayName := username
+	if displayName == "" && email != "" {
+		if at := strings.Index(email, "@"); at > 0 {
+			displayName = email[:at]
+		}
+	}
+	if displayName == "" {
+		displayName = "oidc_user"
+	}
+
+	user, err := s.repo.GetUserByOIDCSub(ctx, sub)
+	if errors.Is(err, ErrNotFound) {
+		user, err = s.repo.CreateOIDCUser(ctx, sub, displayName, "viewer")
+		if err != nil {
+			return nil, fmt.Errorf("OIDC: creating user for sub: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("OIDC: looking up user: %w", err)
+	}
+
+	return s.issueTokenPair(ctx, user)
+}
+
+// IssueTokenPairForUserID creates a session token pair for the given user ID
+// without requiring password verification. Used by QR pairing (Phase 12, CG11)
+// where the pairing code itself serves as the authentication factor.
+func (s *Service) IssueTokenPairForUserID(ctx context.Context, userID int) (*TokenPair, error) {
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("issue tokens for user %d: %w", userID, err)
+	}
+	return s.issueTokenPair(ctx, user)
 }
 
 // issueTokenPair creates a new access JWT and a random refresh token for user.

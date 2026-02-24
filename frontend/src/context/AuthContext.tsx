@@ -24,10 +24,25 @@ interface AuthContextValue {
   user: AuthUser | null;
   /** True while the initial /auth/me check is in progress. */
   loading: boolean;
+  /** True if the backend has OIDC/SSO enabled (Phase 7, CG6). */
+  oidcEnabled: boolean;
+  /**
+   * True when no admin account exists yet (first-run setup required).
+   * Null while the setup check is in-flight. ProtectedRoute reads this
+   * to redirect to /setup instead of /login, eliminating the double
+   * checkSetup call that previously occurred in ProtectedRoute itself.
+   */
+  needsSetup: boolean | null;
   /** Authenticates with username/password. Throws on bad credentials. */
   login: (username: string, password: string) => Promise<void>;
   /** Revokes session and clears state. */
   logout: () => Promise<void>;
+  /**
+   * Called by the Setup page after a successful POST /setup. Injects the
+   * newly-created admin user into the auth context so ProtectedRoute considers
+   * the session active without an extra GET /auth/me round-trip.
+   */
+  onSetupComplete: (user: AuthUser) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -35,6 +50,8 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [oidcEnabled, setOidcEnabled] = useState(false);
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -42,14 +59,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { mountedRef.current = false; };
   }, []);
 
-  // Check session on mount. If the cookie is present and valid, /auth/me returns 200.
+  // Check session and setup state on mount. /setup/status is fetched first (public
+  // endpoint) to discover oidcEnabled and whether first-run setup is needed. Then
+  // /auth/me is attempted to restore an existing session. Both fetches share the same
+  // abort signal so StrictMode double-mount doesn't leave orphaned requests.
   useEffect(() => {
     const ctrl = new AbortController();
+
+    api
+      .checkSetup(ctrl.signal)
+      .then(({ needs_setup, oidc_enabled }) => {
+        if (mountedRef.current) {
+          setNeedsSetup(needs_setup);
+          setOidcEnabled(oidc_enabled);
+        }
+      })
+      .catch(() => {
+        // Non-critical; OIDC badge won't show. Default needsSetup=false so
+        // ProtectedRoute falls through to /login rather than /setup on error.
+        if (mountedRef.current) setNeedsSetup(false);
+      });
+
     api
       .getMe(ctrl.signal)
-      .then(setUser)
-      .catch(() => setUser(null))
-      .finally(() => setLoading(false));
+      .then((u) => { if (mountedRef.current) setUser(u); })
+      .catch(() => {
+        if (ctrl.signal.aborted) return; // StrictMode cleanup abort — second mount handles it
+        if (mountedRef.current) setUser(null);
+      })
+      .finally(() => {
+        if (ctrl.signal.aborted) return; // Don't clear loading=false for the aborted first pass
+        if (mountedRef.current) setLoading(false);
+      });
+
     return () => ctrl.abort();
   }, []);
 
@@ -66,12 +108,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await api.logout();
     } finally {
-      setUser(null);
+      if (mountedRef.current) setUser(null);
+    }
+  }, []);
+
+  // Called by the Setup page after POST /setup succeeds — injects the new user
+  // directly so ProtectedRoute immediately considers the session active.
+  const onSetupComplete = useCallback((newUser: AuthUser) => {
+    if (mountedRef.current) {
+      setUser(newUser);
+      setNeedsSetup(false);
     }
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, oidcEnabled, needsSetup, login, logout, onSetupComplete }}>
       {children}
     </AuthContext.Provider>
   );

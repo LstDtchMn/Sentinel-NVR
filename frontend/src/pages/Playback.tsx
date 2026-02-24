@@ -9,7 +9,7 @@ import { todayDateString, currentMonthString, isoToSecondsSinceMidnight } from "
 import CameraSelector from "../components/playback/CameraSelector";
 import DatePicker from "../components/playback/DatePicker";
 import TimelineBar, { type ZoomLevel } from "../components/playback/TimelineBar";
-import RecordingPlayer from "../components/playback/RecordingPlayer";
+import RecordingPlayer, { type RecordingPlayerHandle } from "../components/playback/RecordingPlayer";
 
 export default function Playback() {
   // Camera state
@@ -43,6 +43,9 @@ export default function Playback() {
   // Ref for stable onTimeUpdate callback
   const activeSegmentRef = useRef(activeSegment);
   activeSegmentRef.current = activeSegment;
+
+  // Ref to the player for imperative seek on timeline click (R6).
+  const playerRef = useRef<RecordingPlayerHandle | null>(null);
 
   // Fetch cameras on mount
   useEffect(() => {
@@ -147,7 +150,10 @@ export default function Playback() {
     setCurrentTime(null);
   }, []);
 
-  // Timeline seek handler — find segment at the clicked time
+  // Timeline seek handler — find segment at the clicked time and seek the player (R6).
+  // For same-segment seeks, calls seekTo() directly on the loaded video.
+  // For cross-segment seeks, calls setInitialSeek() before changing activeSegment so
+  // the RecordingPlayer applies the offset after the new segment's canplay fires.
   const handleTimelineSeek = useCallback(
     (secondsSinceMidnight: number) => {
       const seg = segments.find((s) => {
@@ -157,10 +163,19 @@ export default function Playback() {
       });
 
       if (seg) {
-        setActiveSegment(seg);
+        const segStart = isoToSecondsSinceMidnight(seg.start_time);
+        const offsetWithinSeg = secondsSinceMidnight - segStart;
+        if (seg.id === activeSegmentRef.current?.id) {
+          // Same segment: seek the already-loaded video immediately.
+          playerRef.current?.seekTo(offsetWithinSeg);
+        } else {
+          // Different segment: store offset before React loads the new segment.
+          playerRef.current?.setInitialSeek(offsetWithinSeg);
+          setActiveSegment(seg);
+        }
         setCurrentTime(secondsSinceMidnight);
       } else {
-        // Snap to nearest segment
+        // Snap to nearest segment (start of that segment)
         let closest: TimelineSegment | null = null;
         let closestDist = Infinity;
         for (const s of segments) {
@@ -255,6 +270,7 @@ export default function Playback() {
       <div className="flex-1 flex flex-col min-h-0 p-3 gap-3">
         {/* Video player */}
         <RecordingPlayer
+          ref={playerRef}
           segment={activeSegment}
           segments={segments}
           playbackRate={playbackRate}

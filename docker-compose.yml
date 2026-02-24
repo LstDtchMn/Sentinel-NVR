@@ -74,6 +74,7 @@ services:
     ports:
       - "127.0.0.1:1984:1984"    # REST API + WebUI (localhost only — no auth on this API)
       - "8555:8554"               # RTSP re-stream (8555 on host to avoid conflict with rtsp-test)
+      - "8556:8555/udp"           # WebRTC ICE/DTLS (Phase 12); go2rtc listens on container :8555
     volumes:
       - ./configs/go2rtc.yaml:/config/go2rtc.yaml:ro
     healthcheck:
@@ -91,6 +92,39 @@ services:
       resources:
         limits:
           memory: 1G
+    networks:
+      - backend
+
+  # ---- TURN / STUN Relay (coturn) ----
+  # Required for remote access from mobile clients behind symmetric NAT / CGNAT (Phase 12, R8).
+  # Start with: docker compose --profile relay up -d
+  # Set relay.enabled: true in sentinel.yml and match credentials below.
+  coturn:
+    image: coturn/coturn:4.6.2
+    container_name: sentinel-coturn
+    profiles: ["relay"]
+    restart: unless-stopped
+    ports:
+      - "3478:3478/udp"          # STUN/TURN listener
+      - "3478:3478/tcp"
+      - "49152-49200:49152-49200/udp"  # TURN relay port range
+    command: >
+      -n
+      --lt-cred-mech
+      --fingerprint
+      --no-multicast-peers
+      --no-cli
+      --min-port=49152
+      --max-port=49200
+      --realm=sentinel
+      --user=sentinel:changeme   # IMPORTANT: change this; must match relay.turn_pass in sentinel.yml
+      --external-ip=$$(detect-external-ip)  # auto-detects public IP; replace with static IP for production
+      --relay-ip=0.0.0.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - backend
 

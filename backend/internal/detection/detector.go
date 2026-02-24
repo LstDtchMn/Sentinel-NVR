@@ -16,13 +16,40 @@ import (
 // ErrNotFound is returned by repository methods when an event does not exist.
 var ErrNotFound = errors.New("event not found")
 
-// CameraInfo carries camera identity into the detection package without
-// importing the camera package — preventing a circular dependency:
+// ZoneType distinguishes inclusion zones from exclusion zones.
+// Include: only detect objects whose bbox centre is inside the zone.
+// Exclude: suppress detections whose bbox centre is inside the zone.
+type ZoneType string
+
+const (
+	ZoneInclude ZoneType = "include"
+	ZoneExclude ZoneType = "exclude"
+)
+
+// ZonePoint is a single vertex of a zone polygon, normalised to [0.0, 1.0]
+// relative to the frame width and height.
+type ZonePoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// Zone is a named polygon region on a camera's field of view.
+// Zones are stored as a JSON array in the cameras.zones column (migration 010).
+type Zone struct {
+	ID     string      `json:"id"`
+	Name   string      `json:"name"`
+	Type   ZoneType    `json:"type"`
+	Points []ZonePoint `json:"points"`
+}
+
+// CameraInfo carries camera identity and zone config into the detection package
+// without importing the camera package — preventing a circular dependency:
 //
 //	camera/pipeline.go → detection → eventbus, go2rtc  (no camera import)
 type CameraInfo struct {
-	ID   int
-	Name string
+	ID    int
+	Name  string
+	Zones []Zone // configured detection zones; empty = full-frame detection
 }
 
 // BBox is a normalized bounding box where all coordinates are in the range
@@ -65,8 +92,11 @@ func NewDetector(cfg *config.DetectionConfig, logger *slog.Logger) (Detector, er
 		return NewRemoteDetector(cfg.RemoteURL, logger), nil
 	case "mock":
 		return NewMockDetector(), nil
+	case "onnx", "local":
+		// LocalDetector manages a sentinel-infer subprocess (CGo ONNX Runtime).
+		// main.go checks for the Startable interface and calls Start() before use.
+		return NewLocalDetector(cfg, logger)
 	default:
-		return nil, fmt.Errorf("unsupported detection backend %q (supported: remote, mock; "+
-			"local backends require CGo and are available in Phase 11)", cfg.Backend)
+		return nil, fmt.Errorf("unsupported detection backend %q (supported: remote, mock, onnx)", cfg.Backend)
 	}
 }

@@ -13,6 +13,8 @@ const PAGE_SIZE = 50;
 const EVENT_TYPES = [
   { value: "", label: "All types" },
   { value: "detection", label: "Detection" },
+  { value: "face_match", label: "Face match" },
+  { value: "audio_detection", label: "Audio detection" },
   { value: "camera.connected", label: "Camera connected" },
   { value: "camera.disconnected", label: "Camera disconnected" },
   { value: "recording.started", label: "Recording started" },
@@ -88,7 +90,7 @@ export default function Events() {
   useEffect(() => () => loadMoreCtrlRef.current?.abort(), []);
 
   const loadEvents = useCallback(
-    (params: EventListParams, append: boolean, signal: AbortSignal) => {
+    (params: EventListParams, append: boolean, signal: AbortSignal, onSuccess?: () => void) => {
       if (!append) setLoading(true);
       else setLoadingMore(true);
 
@@ -102,6 +104,9 @@ export default function Events() {
           }
           setTotal(t);
           setError(null);
+          // Advance offset only after confirmed success — prevents skipping a page
+          // when the request is aborted or fails before data is received.
+          onSuccess?.();
           // Clear loading state only on success — avoid clearing when a subsequent
           // filter-change request has already set loading=true for its own fetch.
           setLoading(false);
@@ -143,8 +148,11 @@ export default function Events() {
       ...filtersRef.current,
       offset: offsetRef.current,
     };
-    offsetRef.current += PAGE_SIZE;
-    loadEvents(params, true, ctrl.signal);
+    const nextOffset = offsetRef.current + PAGE_SIZE;
+    loadEvents(params, true, ctrl.signal, () => {
+      // Advance only on confirmed success so a failed/aborted page isn't skipped.
+      offsetRef.current = nextOffset;
+    });
   }
 
   function handleDelete(id: number) {

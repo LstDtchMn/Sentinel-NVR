@@ -4,7 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut } from "lucide-react";
+import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut, Users, Upload } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -14,6 +14,8 @@ const navItems = [
   { to: "/events", label: "Events", icon: Activity },
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/cameras", label: "Cameras", icon: Camera },
+  { to: "/faces", label: "Faces", icon: Users },
+  { to: "/import", label: "Import", icon: Upload, adminOnly: true },
   { to: "/notifications", label: "Notifications", icon: Bell },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
@@ -47,7 +49,7 @@ export default function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 py-4 px-3 space-y-1">
-        {navItems.map((item) => (
+        {navItems.filter((item) => !item.adminOnly || user?.role === "admin").map((item) => (
           <NavLink
             key={item.to}
             to={item.to}

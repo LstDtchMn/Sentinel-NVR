@@ -23,6 +23,7 @@ import (
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/pathutil"
 )
 
 // Recorder manages a single ffmpeg subprocess for recording a camera stream.
@@ -54,10 +55,18 @@ func NewRecorder(
 	bus *eventbus.Bus,
 	logger *slog.Logger,
 ) *Recorder {
+	// Resolve symlinks in hotPath so IsUnderPath checks work correctly when
+	// the storage directory is a symlink (common in NVR deployments where
+	// /media/hot -> /mnt/nas/recordings). Falls back to the raw path if not
+	// yet created (first-run before directories are created by ffmpeg).
+	realHotPath, err := filepath.EvalSymlinks(hotPath)
+	if err != nil {
+		realHotPath = hotPath
+	}
 	return &Recorder{
 		cam:             cam,
 		rtspBase:        rtspBase,
-		hotPath:         hotPath,
+		hotPath:         realHotPath,
 		segmentDuration: segmentDuration,
 		recRepo:         recRepo,
 		bus:             bus,
@@ -272,7 +281,7 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 	// inserting into the DB. The serve/delete endpoints also check at read time,
 	// but early rejection prevents unresolvable DB records and defends against
 	// misconfiguration or unexpected ffmpeg output paths.
-	if !isUnderPath(segPath, r.hotPath) {
+	if !pathutil.IsUnderPath(segPath, r.hotPath) {
 		r.logger.Error("segment path escapes hot storage boundary, refusing to record",
 			"path", segPath, "hot_path", r.hotPath)
 		return
@@ -428,7 +437,8 @@ func (r *Recorder) buildFFmpegArgs() []string {
 		"-loglevel", "warning",
 		// Input: go2rtc RTSP re-stream (TCP transport for reliability)
 		"-rtsp_transport", "tcp",
-		"-stimeout", "10000000", // 10s RTSP socket timeout in microseconds (ffmpeg RTSP demuxer option)
+		"-stimeout", "10000000", // RTSP socket timeout for ffmpeg < 5.x
+		"-timeout", "10000000",  // RTSP socket timeout for ffmpeg >= 5.x (renamed from -stimeout)
 		"-i", fmt.Sprintf("%s/%s", strings.TrimRight(r.rtspBase, "/"), r.cam.Name),
 		// Output: copy streams (zero transcoding)
 		"-c", "copy",

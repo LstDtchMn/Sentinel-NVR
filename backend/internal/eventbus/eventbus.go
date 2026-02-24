@@ -11,7 +11,9 @@ import (
 // Event represents something that happened in the system.
 type Event struct {
 	Type       string    `json:"type"`
+	EventID    int64     `json:"event_id,omitempty"`   // DB events.id; non-zero only on "events.persisted" events
 	CameraID   int       `json:"camera_id,omitempty"`
+	CameraName string    `json:"camera_name,omitempty"` // human-readable name for notifications (Phase 8)
 	Label      string    `json:"label,omitempty"`
 	Confidence float64   `json:"confidence,omitempty"` // 0.0–1.0 for detection events
 	Thumbnail  string    `json:"thumbnail,omitempty"`  // Phase 5: absolute path to snapshot JPEG

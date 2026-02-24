@@ -1,10 +1,12 @@
 /**
- * Cameras — camera management page with add/delete and live status.
+ * Cameras — camera management page with add/edit/delete and live status.
  * Polls /api/v1/cameras every 5s for real-time go2rtc stream health.
+ * Phase 9: added Edit form and Zones link per camera card.
  */
 import { useEffect, useState, useCallback, useRef } from "react";
+import { Link } from "react-router-dom";
 import { api, CameraDetail, CameraState, CameraInput } from "../api/client";
-import { Camera, Circle, Plus, Trash2, X } from "lucide-react";
+import { Camera, Circle, Edit2, MapPin, Plus, Trash2, X } from "lucide-react";
 
 const STATUS_COLORS: Record<CameraState, string> = {
   streaming: "text-green-400",
@@ -19,6 +21,7 @@ export default function Cameras() {
   const [cameras, setCameras] = useState<CameraDetail[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [editingCamera, setEditingCamera] = useState<CameraDetail | null>(null);
   // Tracks fire-and-forget manual refresh controllers so they can be cancelled on unmount.
   const manualCtrlRef = useRef<AbortController | null>(null);
 
@@ -61,12 +64,19 @@ export default function Cameras() {
 
   const handleDelete = async (name: string) => {
     if (!window.confirm(`Delete camera "${name}"? This cannot be undone.`)) return;
+    // Register this controller in manualCtrlRef so the unmount cleanup aborts it.
+    // ctrl.signal.aborted then serves as the mounted-check for post-await code.
+    manualCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    manualCtrlRef.current = ctrl;
     try {
-      await api.deleteCamera(name);
+      await api.deleteCamera(name, ctrl.signal);
+      if (ctrl.signal.aborted) return; // component unmounted while DELETE was in-flight
       manualCtrlRef.current?.abort();
       manualCtrlRef.current = new AbortController();
       fetchCameras(manualCtrlRef.current.signal);
     } catch (err) {
+      if (ctrl.signal.aborted) return; // ignore post-unmount errors
       setError(err instanceof Error ? err.message : "Delete failed");
     }
   };
@@ -78,11 +88,18 @@ export default function Cameras() {
     fetchCameras(manualCtrlRef.current.signal);
   };
 
+  const handleEdited = () => {
+    setEditingCamera(null);
+    manualCtrlRef.current?.abort();
+    manualCtrlRef.current = new AbortController();
+    fetchCameras(manualCtrlRef.current.signal);
+  };
+
   return (
     <div className="p-8">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Cameras</h1>
-        {!showForm && (
+        {!showForm && !editingCamera && (
           <button
             onClick={() => setShowForm(true)}
             className="flex items-center gap-2 bg-sentinel-500 hover:bg-sentinel-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
@@ -106,11 +123,20 @@ export default function Cameras() {
         />
       )}
 
+      {editingCamera && (
+        <EditCameraForm
+          key={editingCamera.id}
+          camera={editingCamera}
+          onSuccess={handleEdited}
+          onCancel={() => setEditingCamera(null)}
+        />
+      )}
+
       {cameras === null && !error && (
         <p className="text-muted animate-pulse">Loading cameras...</p>
       )}
 
-      {cameras !== null && cameras.length === 0 && !error && !showForm && (
+      {cameras !== null && cameras.length === 0 && !error && !showForm && !editingCamera && (
         <div className="text-center py-16">
           <Camera className="w-12 h-12 text-faint mx-auto mb-4" />
           <p className="text-muted">No cameras configured</p>
@@ -126,7 +152,12 @@ export default function Cameras() {
       {cameras !== null && cameras.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {cameras.map((cam) => (
-            <CameraCard key={cam.id} camera={cam} onDelete={handleDelete} />
+            <CameraCard
+              key={cam.id}
+              camera={cam}
+              onDelete={handleDelete}
+              onEdit={(cam) => { setShowForm(false); setEditingCamera(cam); }}
+            />
           ))}
         </div>
       )}
@@ -137,9 +168,11 @@ export default function Cameras() {
 function CameraCard({
   camera,
   onDelete,
+  onEdit,
 }: {
   camera: CameraDetail;
   onDelete: (name: string) => void;
+  onEdit: (camera: CameraDetail) => void;
 }) {
   const ps = camera.pipeline_status;
   const state = ps?.state || "idle";
@@ -150,6 +183,14 @@ function CameraCard({
         <h3 className="font-medium truncate mr-2">{camera.name}</h3>
         <div className="flex items-center gap-2">
           <StatusBadge status={state} />
+          <button
+            onClick={() => onEdit(camera)}
+            className="text-faint hover:text-sentinel-400 transition-colors p-1"
+            aria-label={`Edit camera ${camera.name}`}
+            title="Edit camera"
+          >
+            <Edit2 className="w-4 h-4" />
+          </button>
           <button
             onClick={() => onDelete(camera.name)}
             className="text-faint hover:text-red-400 transition-colors p-1"
@@ -180,6 +221,18 @@ function CameraCard({
           <p className="text-red-400 text-xs truncate" title={ps.last_error}>
             {ps.last_error}
           </p>
+        )}
+        {/* Zones link — only shown when detection is enabled (Phase 9) */}
+        {camera.detect && (
+          <div className="pt-1">
+            <Link
+              to={`/cameras/${encodeURIComponent(camera.name)}/zones`}
+              className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              <MapPin className="w-3.5 h-3.5" />
+              Zones {camera.zones?.length > 0 ? `(${camera.zones.length})` : ""}
+            </Link>
+          </div>
         )}
       </div>
     </div>
@@ -281,6 +334,7 @@ function AddCameraForm({
             <input
               id="cam-main-stream"
               type="text"
+              autoComplete="off"
               value={mainStream}
               onChange={(e) => setMainStream(e.target.value)}
               placeholder="rtsp://user:pass@192.168.1.100:554/stream1"
@@ -295,6 +349,7 @@ function AddCameraForm({
           <input
             id="cam-sub-stream"
             type="text"
+            autoComplete="off"
             value={subStream}
             onChange={(e) => setSubStream(e.target.value)}
             placeholder="rtsp://user:pass@192.168.1.100:554/stream2"
@@ -322,6 +377,135 @@ function AddCameraForm({
             className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
           >
             {submitting ? "Adding..." : "Add Camera"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function EditCameraForm({
+  camera,
+  onSuccess,
+  onCancel,
+}: {
+  camera: CameraDetail;
+  onSuccess: () => void;
+  onCancel: () => void;
+}) {
+  const [mainStream, setMainStream] = useState(camera.main_stream);
+  const [subStream, setSubStream] = useState(camera.sub_stream || "");
+  const [enabled, setEnabled] = useState(camera.enabled);
+  const [record, setRecord] = useState(camera.record);
+  const [detect, setDetect] = useState(camera.detect);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const saveCtrlRef = useRef<AbortController>(null);
+
+  // Abort in-flight save on unmount (e.g. user clicks Cancel or switches cameras)
+  useEffect(() => () => saveCtrlRef.current?.abort(), []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mainStream.trim()) return;
+
+    setSubmitting(true);
+    setFormError(null);
+
+    saveCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    saveCtrlRef.current = ctrl;
+    try {
+      // zones are intentionally omitted — server preserves existing zones on update
+      const input: CameraInput = {
+        name: camera.name,
+        main_stream: mainStream.trim(),
+        sub_stream: subStream.trim() || undefined,
+        enabled,
+        record,
+        detect,
+      };
+      await api.updateCamera(camera.name, input, ctrl.signal);
+      onSuccess();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setFormError(err instanceof Error ? err.message : "Failed to update camera");
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="bg-surface-raised border border-border rounded-lg p-6 mb-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-medium">Edit Camera</h2>
+        <button onClick={onCancel} className="text-muted hover:text-white p-1" aria-label="Close form">
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      {formError && (
+        <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 mb-4">
+          <p className="text-red-400 text-sm">{formError}</p>
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm text-muted mb-1">
+              Name
+              <span className="ml-2 text-xs text-faint">(read-only — rename via delete + recreate)</span>
+            </label>
+            <p className="text-sm text-white/60 font-mono py-2">{camera.name}</p>
+          </div>
+          <div>
+            <label htmlFor="edit-main-stream" className="block text-sm text-muted mb-1">Main Stream URL *</label>
+            <input
+              id="edit-main-stream"
+              type="text"
+              autoComplete="off"
+              value={mainStream}
+              onChange={(e) => setMainStream(e.target.value)}
+              placeholder="rtsp://user:pass@192.168.1.100:554/stream1"
+              required
+              className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label htmlFor="edit-sub-stream" className="block text-sm text-muted mb-1">Sub Stream URL (optional)</label>
+          <input
+            id="edit-sub-stream"
+            type="text"
+            autoComplete="off"
+            value={subStream}
+            onChange={(e) => setSubStream(e.target.value)}
+            placeholder="rtsp://user:pass@192.168.1.100:554/stream2"
+            className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
+          />
+        </div>
+
+        <div className="flex items-center gap-6">
+          <Toggle label="Enabled" checked={enabled} onChange={setEnabled} />
+          <Toggle label="Record" checked={record} onChange={setRecord} />
+          <Toggle label="Detect" checked={detect} onChange={setDetect} />
+        </div>
+
+        <div className="flex justify-end gap-3 pt-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-muted hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={submitting || !mainStream.trim()}
+            className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            {submitting ? "Saving..." : "Save Changes"}
           </button>
         </div>
       </form>

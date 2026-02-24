@@ -3,10 +3,13 @@ package detection
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/dbutil"
 )
 
 // EventRecord represents a single row from the events table.
@@ -106,7 +109,7 @@ func (r *Repository) GetByID(ctx context.Context, id int) (*EventRecord, error) 
 		 FROM events WHERE id = ?`, id,
 	)
 	ev, err := scanEvent(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -196,20 +199,20 @@ func scanEvent(s scanner) (EventRecord, error) {
 	}
 	ev.HasClip = hasClipInt != 0
 
-	startTime, err := parseSQLiteTime(startStr)
+	startTime, err := dbutil.ParseSQLiteTime(startStr)
 	if err != nil {
 		return EventRecord{}, fmt.Errorf("invalid start_time %q: %w", startStr, err)
 	}
 	ev.StartTime = startTime
 
-	createdAt, err := parseSQLiteTime(createdStr)
+	createdAt, err := dbutil.ParseSQLiteTime(createdStr)
 	if err != nil {
 		return EventRecord{}, fmt.Errorf("invalid created_at %q: %w", createdStr, err)
 	}
 	ev.CreatedAt = createdAt
 
 	if endStr != nil {
-		t, err := parseSQLiteTime(*endStr)
+		t, err := dbutil.ParseSQLiteTime(*endStr)
 		if err != nil {
 			return EventRecord{}, fmt.Errorf("invalid end_time %q: %w", *endStr, err)
 		}
@@ -251,7 +254,7 @@ func (r *Repository) GetHeatmap(ctx context.Context, cameraID int, date time.Tim
 		if err := rows.Scan(&startStr); err != nil {
 			return nil, fmt.Errorf("scanning heatmap row: %w", err)
 		}
-		t, err := parseSQLiteTime(startStr)
+		t, err := dbutil.ParseSQLiteTime(startStr)
 		if err != nil {
 			return nil, fmt.Errorf("parsing heatmap start_time %q: %w", startStr, err)
 		}
@@ -286,20 +289,3 @@ func (r *Repository) GetHeatmap(ctx context.Context, cameraID int, date time.Tim
 	return result, nil
 }
 
-// parseSQLiteTime parses a timestamp string from SQLite.
-// Duplicated from recording.parseSQLiteTime — both packages use the same
-// modernc/sqlite driver which stores time.Time as text in various layouts.
-func parseSQLiteTime(s string) (time.Time, error) {
-	for _, layout := range []string{
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05Z",
-		"2006-01-02T15:04:05",
-		time.RFC3339,
-		time.RFC3339Nano,
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("cannot parse timestamp %q", s)
-}

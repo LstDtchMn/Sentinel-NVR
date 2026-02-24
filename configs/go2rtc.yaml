@@ -8,9 +8,18 @@ api:
 rtsp:
   listen: ":8554"
 
-# WebRTC — Phase 3 (disabled until live view implementation)
-# webrtc:
-#   listen: ":8555"
+# WebRTC — Phase 12: enabled for remote access via TURN relay (CG11, R8).
+# ICE servers must match relay.turn_server/turn_user/turn_pass in sentinel.yml.
+webrtc:
+  listen: ":8555"
+  candidates:
+    - "stun:8555"    # resolve LAN/public IP via STUN; advertise on UDP port 8555
+  ice_servers:
+    - urls: [ "stun:stun.l.google.com:19302" ]
+    # Uncomment and match sentinel.yml relay.* when relay.enabled: true:
+    # - urls: [ "turn:coturn:3478" ]
+    #   username: "sentinel"
+    #   credential: "changeme"
 
 log:
   level: info

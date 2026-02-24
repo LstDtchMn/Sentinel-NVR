@@ -1,0 +1,57 @@
+name: sentinel_nvr
+description: Sentinel NVR mobile companion app (CG11, R8)
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # HTTP + persistent cookie session (mirrors browser httpOnly cookie behaviour)
+  dio: ^5.7.0
+  dio_cookie_manager: ^3.1.1
+  cookie_jar: ^4.0.8
+
+  # Declarative navigation + deep-link support (push notification → /events/:id)
+  go_router: ^14.6.2
+
+  # Lightweight ChangeNotifier state management
+  provider: ^6.1.2
+
+  # WebRTC live streaming via go2rtc WebSocket proxy (local network, Phase 11)
+  flutter_webrtc: ^0.10.5
+
+  # MP4 recording playback (timeline scrubber)
+  video_player: ^2.9.2
+
+  # Push notifications — FCM + APNs
+  firebase_core: ^3.6.0
+  firebase_messaging: ^15.1.3
+  flutter_local_notifications: ^17.2.4
+
+  # Biometric unlock
+  local_auth: ^2.3.0
+
+  # Persist host URL + biometric preference
+  shared_preferences: ^2.3.3
+
+  # PersistCookieJar storage directory
+  path_provider: ^2.1.4
+
+  # Date/time formatting for timeline labels
+  intl: ^0.19.0
+
+  # QR code scanning for zero-config server pairing (Phase 12, CG11, R8)
+  mobile_scanner: ^6.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

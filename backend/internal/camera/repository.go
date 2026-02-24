@@ -3,6 +3,7 @@ package camera
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/auth"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/dbutil"
 )
 
 // Sentinel errors for camera repository operations.
@@ -27,6 +29,7 @@ type CameraRecord struct {
 	SubStream  string    `json:"sub_stream"`
 	Record     bool      `json:"record"`
 	Detect     bool      `json:"detect"`
+	Zones      json.RawMessage `json:"zones"` // JSON array of detection.Zone; default [] (Phase 9)
 	ONVIFHost  string    `json:"onvif_host,omitempty"`
 	ONVIFPort  int       `json:"onvif_port,omitempty"`
 	ONVIFUser  string    `json:"onvif_user,omitempty"`
@@ -69,7 +72,7 @@ func (r *Repository) decryptPass(pass string) (string, error) {
 // List returns all cameras ordered by name.
 func (r *Repository) List(ctx context.Context) ([]CameraRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, name, enabled, main_stream, sub_stream, record, detect,
+		SELECT id, name, enabled, main_stream, sub_stream, record, detect, zones,
 		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
 		FROM cameras ORDER BY name`)
 	if err != nil {
@@ -91,7 +94,7 @@ func (r *Repository) List(ctx context.Context) ([]CameraRecord, error) {
 // GetByName returns a single camera by its unique name.
 func (r *Repository) GetByName(ctx context.Context, name string) (*CameraRecord, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, name, enabled, main_stream, sub_stream, record, detect,
+		SELECT id, name, enabled, main_stream, sub_stream, record, detect, zones,
 		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
 		FROM cameras WHERE name = ?`, name)
 
@@ -108,7 +111,7 @@ func (r *Repository) GetByName(ctx context.Context, name string) (*CameraRecord,
 // GetByID returns the camera with the given numeric ID, or ErrNotFound if absent.
 func (r *Repository) GetByID(ctx context.Context, id int) (*CameraRecord, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, name, enabled, main_stream, sub_stream, record, detect,
+		SELECT id, name, enabled, main_stream, sub_stream, record, detect, zones,
 		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
 		FROM cameras WHERE id = ?`, id)
 
@@ -132,12 +135,16 @@ func (r *Repository) Create(ctx context.Context, cam *CameraRecord) (*CameraReco
 	var id int
 	var createdAt, updatedAt time.Time
 
+	zones := cam.Zones
+	if len(zones) == 0 {
+		zones = json.RawMessage("[]")
+	}
 	err = r.db.QueryRowContext(ctx, `
-		INSERT INTO cameras (name, enabled, main_stream, sub_stream, record, detect,
+		INSERT INTO cameras (name, enabled, main_stream, sub_stream, record, detect, zones,
 		                     onvif_host, onvif_port, onvif_user, onvif_pass)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id, created_at, updated_at`,
-		cam.Name, cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect,
+		cam.Name, cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect, string(zones),
 		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, encPass,
 	).Scan(&id, &createdAt, &updatedAt)
 
@@ -166,14 +173,18 @@ func (r *Repository) Update(ctx context.Context, name string, cam *CameraRecord)
 	var id int
 	var createdAt, updatedAt time.Time
 
+	updZones := cam.Zones
+	if len(updZones) == 0 {
+		updZones = json.RawMessage("[]")
+	}
 	err = r.db.QueryRowContext(ctx, `
 		UPDATE cameras
-		SET enabled = ?, main_stream = ?, sub_stream = ?, record = ?, detect = ?,
+		SET enabled = ?, main_stream = ?, sub_stream = ?, record = ?, detect = ?, zones = ?,
 		    onvif_host = ?, onvif_port = ?, onvif_user = ?, onvif_pass = ?,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE name = ?
 		RETURNING id, created_at, updated_at`,
-		cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect,
+		cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect, string(updZones),
 		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, encPass,
 		name,
 	).Scan(&id, &createdAt, &updatedAt)
@@ -272,11 +283,13 @@ func (r *Repository) SeedFromConfig(ctx context.Context, cameras []config.Camera
 func (r *Repository) scanCamera(rows *sql.Rows) (CameraRecord, error) {
 	var cam CameraRecord
 	var enabled, record, detect int64
+	var zonesRaw sql.NullString
+	var createdStr, updatedStr string
 	err := rows.Scan(
 		&cam.ID, &cam.Name, &enabled, &cam.MainStream, &cam.SubStream,
-		&record, &detect,
+		&record, &detect, &zonesRaw,
 		&cam.ONVIFHost, &cam.ONVIFPort, &cam.ONVIFUser, &cam.ONVIFPass,
-		&cam.CreatedAt, &cam.UpdatedAt,
+		&createdStr, &updatedStr,
 	)
 	if err != nil {
 		return cam, fmt.Errorf("scanning camera row: %w", err)
@@ -284,6 +297,17 @@ func (r *Repository) scanCamera(rows *sql.Rows) (CameraRecord, error) {
 	cam.Enabled = enabled != 0
 	cam.Record = record != 0
 	cam.Detect = detect != 0
+	if cam.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr); err != nil {
+		return cam, fmt.Errorf("parsing camera %q created_at: %w", cam.Name, err)
+	}
+	if cam.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr); err != nil {
+		return cam, fmt.Errorf("parsing camera %q updated_at: %w", cam.Name, err)
+	}
+	if zonesRaw.Valid && len(zonesRaw.String) > 0 {
+		cam.Zones = json.RawMessage(zonesRaw.String)
+	} else {
+		cam.Zones = json.RawMessage("[]")
+	}
 	cam.ONVIFPass, err = r.decryptPass(cam.ONVIFPass)
 	if err != nil {
 		return cam, fmt.Errorf("decrypting camera %q credential: %w", cam.Name, err)
@@ -295,11 +319,13 @@ func (r *Repository) scanCamera(rows *sql.Rows) (CameraRecord, error) {
 func (r *Repository) scanCameraRow(row *sql.Row) (CameraRecord, error) {
 	var cam CameraRecord
 	var enabled, record, detect int64
+	var zonesRaw sql.NullString
+	var createdStr, updatedStr string
 	err := row.Scan(
 		&cam.ID, &cam.Name, &enabled, &cam.MainStream, &cam.SubStream,
-		&record, &detect,
+		&record, &detect, &zonesRaw,
 		&cam.ONVIFHost, &cam.ONVIFPort, &cam.ONVIFUser, &cam.ONVIFPass,
-		&cam.CreatedAt, &cam.UpdatedAt,
+		&createdStr, &updatedStr,
 	)
 	if err != nil {
 		return cam, err
@@ -307,6 +333,17 @@ func (r *Repository) scanCameraRow(row *sql.Row) (CameraRecord, error) {
 	cam.Enabled = enabled != 0
 	cam.Record = record != 0
 	cam.Detect = detect != 0
+	if cam.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr); err != nil {
+		return cam, fmt.Errorf("parsing camera %q created_at: %w", cam.Name, err)
+	}
+	if cam.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr); err != nil {
+		return cam, fmt.Errorf("parsing camera %q updated_at: %w", cam.Name, err)
+	}
+	if zonesRaw.Valid && len(zonesRaw.String) > 0 {
+		cam.Zones = json.RawMessage(zonesRaw.String)
+	} else {
+		cam.Zones = json.RawMessage("[]")
+	}
 	cam.ONVIFPass, err = r.decryptPass(cam.ONVIFPass)
 	if err != nil {
 		return cam, fmt.Errorf("decrypting camera %q credential: %w", cam.Name, err)

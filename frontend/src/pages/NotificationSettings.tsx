@@ -51,12 +51,15 @@ export default function NotificationSettings() {
         setPrefs(p);
         setLog(l);
         setError(null);
+        setLoading(false);
       })
       .catch((err) => {
+        // .finally() would fire even on abort, clearing loading for an in-flight
+        // request that a concurrent re-mount may already be tracking.
         if (err instanceof DOMException && err.name === "AbortError") return;
         setError(err.message);
-      })
-      .finally(() => setLoading(false));
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {

@@ -4,26 +4,52 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/auth"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/camera"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/detection"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/notification"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/importers"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/pathutil"
 )
+
+// setupUsernameRE validates usernames during first-run setup.
+var setupUsernameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9_-]?$`)
+
+// parseSlogLevel converts a sentinel log_level string to a slog.Level constant.
+func parseSlogLevel(level string) slog.Level {
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
 
 // registerRoutes mounts all API v1 endpoints on the Gin router.
 // Public routes (health, auth) are registered on the base v1 group.
@@ -42,7 +68,16 @@ func (s *Server) registerRoutes() {
 		authGroup.POST("/login", s.handleAuthLogin)
 		authGroup.POST("/refresh", s.handleAuthRefresh)
 		authGroup.POST("/logout", s.handleAuthLogout)
+		// OIDC SSO routes — registered only when the provider is wired up (Phase 7, CG6).
+		if s.oidcProvider != nil {
+			authGroup.GET("/oidc/login", s.handleOIDCLogin)
+			authGroup.GET("/oidc/callback", s.handleOIDCCallback)
+		}
 	}
+
+	// First-run setup (Phase 7, CG6) — public so the UI can check/redirect before login
+	v1.GET("/setup", s.handleSetupCheck)
+	v1.POST("/setup", s.handleSetupCreate)
 
 	// --- Protected endpoints ---
 	// When authService is non-nil (auth.enabled=true), all routes below require
@@ -53,6 +88,7 @@ func (s *Server) registerRoutes() {
 	}
 	{
 		protected.GET("/config", s.handleGetConfig)
+		protected.PUT("/config", s.handleUpdateConfig) // admin-only; Phase 9 settings persistence
 
 		// Current user info (Phase 7) — returns the authenticated user's public fields.
 		protected.GET("/auth/me", s.handleAuthMe)
@@ -61,6 +97,7 @@ func (s *Server) registerRoutes() {
 		protected.GET("/cameras", s.handleListCameras)
 		protected.GET("/cameras/:name", s.handleGetCamera)
 		protected.GET("/cameras/:name/status", s.handleCameraStatus)
+		protected.GET("/cameras/:name/snapshot", s.handleCameraSnapshot) // Phase 9: zone editor background
 		protected.POST("/cameras", s.handleCreateCamera)
 		protected.PUT("/cameras/:name", s.handleUpdateCamera)
 		protected.DELETE("/cameras/:name", s.handleDeleteCamera)
@@ -80,6 +117,9 @@ func (s *Server) registerRoutes() {
 		// Playback timeline (Phase 4) — registered before :id routes for clear routing
 		protected.GET("/recordings/timeline", s.handleRecordingTimeline)
 		protected.GET("/recordings/days", s.handleRecordingDays)
+
+		// Storage stats (Phase 10, R13) — aggregate used_bytes per tier
+		protected.GET("/storage/stats", s.handleStorageStats)
 
 		// Recording management (Phase 2)
 		protected.GET("/recordings", s.handleListRecordings)
@@ -101,7 +141,104 @@ func (s *Server) registerRoutes() {
 			notif.DELETE("/prefs/:id", s.handleDeleteNotifPref)
 			notif.GET("/log", s.handleListNotifLog)
 		}
+
+		// Face recognition management (Phase 13, R11)
+		faces := protected.Group("/faces")
+		{
+			faces.GET("", s.handleListFaces)
+			faces.POST("", s.handleCreateFace)
+			faces.GET("/:id", s.handleGetFace)
+			faces.PUT("/:id", s.handleUpdateFace)
+			faces.DELETE("/:id", s.handleDeleteFace)
+		}
+
+		// Migration / import (Phase 14, R15)
+		protected.POST("/import/preview", s.handleImportPreview) // dry-run: parse + validate
+		protected.POST("/import", s.handleImportExecute)         // actually create cameras
+
+		// Remote access (Phase 12, CG11, R8)
+		protected.GET("/relay/ice-servers", s.handleRelayICEServers)
+		protected.POST("/pairing/qr", s.handlePairingQR)
 	}
+
+	// Public pairing redeem — mobile app has no auth session when it calls this (Phase 12, CG11).
+	v1.POST("/pairing/redeem", s.handlePairingRedeem)
+}
+
+// handleSetupCheck reports whether first-run setup is needed (Phase 7, CG6).
+// GET /api/v1/setup — public; returns {"needs_setup": bool, "oidc_enabled": bool}.
+func (s *Server) handleSetupCheck(c *gin.Context) {
+	if s.authService == nil {
+		// Auth is disabled — no setup needed, no OIDC.
+		c.JSON(http.StatusOK, gin.H{"needs_setup": false, "oidc_enabled": false})
+		return
+	}
+	needs, err := s.authService.NeedsSetup(c.Request.Context())
+	if err != nil {
+		s.logger.Error("setup check failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "setup check failed"})
+		return
+	}
+	cfg := s.snapConfig()
+	c.JSON(http.StatusOK, gin.H{
+		"needs_setup":  needs,
+		"oidc_enabled": cfg.Auth.OIDC.Enabled,
+	})
+}
+
+// handleSetupCreate creates the first admin account during first-run setup (Phase 7, CG6).
+// POST /api/v1/setup   body: {"username":"...","password":"..."}
+// Responds with the created user and sets auth cookies, same as /auth/login.
+func (s *Server) handleSetupCreate(c *gin.Context) {
+	if s.authService == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "auth is disabled; setup is not required"})
+		return
+	}
+
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password required"})
+		return
+	}
+
+	// Validate username format — same rules as camera names (printable, no shell-special chars).
+	if !setupUsernameRE.MatchString(req.Username) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username must be 1–64 alphanumeric/space/dash/underscore characters"})
+		return
+	}
+	if len(req.Password) < 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+		return
+	}
+	// bcrypt silently truncates inputs at 72 bytes. A multi-MB password would still
+	// consume ~1s of CPU before truncation — enforce the limit explicitly (CG6).
+	if len(req.Password) > 72 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must not exceed 72 characters"})
+		return
+	}
+
+	user, pair, err := s.authService.Setup(c.Request.Context(), req.Username, req.Password)
+	if err != nil {
+		if errors.Is(err, auth.ErrSetupAlreadyDone) {
+			c.JSON(http.StatusConflict, gin.H{"error": "setup already completed"})
+			return
+		}
+		s.logger.Error("setup failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "setup failed"})
+		return
+	}
+
+	auth.SetTokenCookies(c, pair, s.snapConfig().Auth.SecureCookie)
+	c.JSON(http.StatusCreated, gin.H{
+		"user": gin.H{
+			"id":       user.ID,
+			"username": user.Username,
+			"role":     user.Role,
+		},
+	})
 }
 
 // handleAuthLogin authenticates a user and issues JWT + refresh token cookies (Phase 7, CG6).
@@ -127,6 +264,12 @@ func (s *Server) handleAuthLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password required"})
 		return
 	}
+	// bcrypt silently truncates inputs at 72 bytes. A multi-MB password would still
+	// consume ~1s of CPU before truncation — enforce the limit explicitly (CG6).
+	if len(req.Password) > 72 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
 
 	pair, err := s.authService.Login(c.Request.Context(), req.Username, req.Password)
 	if err != nil {
@@ -141,7 +284,7 @@ func (s *Server) handleAuthLogin(c *gin.Context) {
 
 	// Reset rate limit on successful login so legitimate users aren't locked out.
 	s.loginLimiter.reset(ip)
-	auth.SetTokenCookies(c, pair, s.cfg.Auth.SecureCookie)
+	auth.SetTokenCookies(c, pair, s.snapConfig().Auth.SecureCookie)
 	c.JSON(http.StatusOK, gin.H{"message": "logged in"})
 }
 
@@ -159,9 +302,10 @@ func (s *Server) handleAuthRefresh(c *gin.Context) {
 	}
 
 	pair, err := s.authService.Refresh(c.Request.Context(), refreshToken)
+	secureCookie := s.snapConfig().Auth.SecureCookie
 	if err != nil {
 		if errors.Is(err, auth.ErrNotFound) || errors.Is(err, auth.ErrTokenExpired) {
-			auth.ClearTokenCookies(c, s.cfg.Auth.SecureCookie)
+			auth.ClearTokenCookies(c, secureCookie)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired, please log in again"})
 			return
 		}
@@ -170,7 +314,7 @@ func (s *Server) handleAuthRefresh(c *gin.Context) {
 		return
 	}
 
-	auth.SetTokenCookies(c, pair, s.cfg.Auth.SecureCookie)
+	auth.SetTokenCookies(c, pair, secureCookie)
 	c.JSON(http.StatusOK, gin.H{"message": "refreshed"})
 }
 
@@ -185,7 +329,7 @@ func (s *Server) handleAuthLogout(c *gin.Context) {
 			}
 		}
 	}
-	auth.ClearTokenCookies(c, s.cfg.Auth.SecureCookie)
+	auth.ClearTokenCookies(c, s.snapConfig().Auth.SecureCookie)
 	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
 }
 
@@ -225,7 +369,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 		s.logger.Error("camera count failed", "error", err)
 	}
 
-	recCount, err := s.recRepo.Count(c.Request.Context())
+	recCount, err := s.recRepo.Count(c.Request.Context(), "", time.Time{}, time.Time{})
 	if err != nil {
 		s.logger.Error("recording count failed", "error", err)
 	}
@@ -249,6 +393,47 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"database":           dbStatus,
 		"go2rtc":             g2rStatus,
 	})
+}
+
+// handleStorageStats returns aggregate used bytes and segment counts per storage tier (Phase 10, R13).
+// GET /api/v1/storage/stats — cross-platform, no syscall; queries the recordings DB table.
+func (s *Server) handleStorageStats(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	// Use resolved (symlink-expanded) paths: DB stores real paths (recorder calls EvalSymlinks),
+	// so the LIKE prefix must match the real path, not a symlink alias.
+	hot, cold, err := s.recRepo.StorageStats(ctx, s.resolvedHotPath, s.resolvedColdPath)
+	if err != nil {
+		s.logger.Error("storage stats query failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query storage stats"})
+		return
+	}
+
+	type tierResp struct {
+		Path         string `json:"path"`
+		UsedBytes    int64  `json:"used_bytes"`
+		SegmentCount int    `json:"segment_count"`
+	}
+
+	cfg := s.snapConfig()
+	resp := gin.H{
+		"hot": tierResp{
+			Path:         cfg.Storage.HotPath,
+			UsedBytes:    hot.UsedBytes,
+			SegmentCount: hot.SegmentCount,
+		},
+	}
+	if cfg.Storage.ColdPath != "" {
+		resp["cold"] = tierResp{
+			Path:         cfg.Storage.ColdPath,
+			UsedBytes:    cold.UsedBytes,
+			SegmentCount: cold.SegmentCount,
+		}
+	} else {
+		resp["cold"] = nil
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleGetConfig returns the current system configuration with sensitive
@@ -292,23 +477,104 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 		}
 	}
 
+	cfg := s.snapConfig()
 	c.JSON(http.StatusOK, gin.H{
 		"server": safeServer{
-			Host:     s.cfg.Server.Host,
-			Port:     s.cfg.Server.Port,
-			LogLevel: s.cfg.Server.LogLevel,
+			Host:     cfg.Server.Host,
+			Port:     cfg.Server.Port,
+			LogLevel: cfg.Server.LogLevel,
 		},
 		"storage": safeStorage{
-			HotPath:           s.cfg.Storage.HotPath,
-			ColdPath:          s.cfg.Storage.ColdPath,
-			HotRetentionDays:  s.cfg.Storage.HotRetentionDays,
-			ColdRetentionDays: s.cfg.Storage.ColdRetentionDays,
-			SegmentDuration:   s.cfg.Storage.SegmentDuration,
-			SegmentFormat:     s.cfg.Storage.SegmentFormat,
+			HotPath:           cfg.Storage.HotPath,
+			ColdPath:          cfg.Storage.ColdPath,
+			HotRetentionDays:  cfg.Storage.HotRetentionDays,
+			ColdRetentionDays: cfg.Storage.ColdRetentionDays,
+			SegmentDuration:   cfg.Storage.SegmentDuration,
+			SegmentFormat:     cfg.Storage.SegmentFormat,
 		},
-		"detection": gin.H{"enabled": s.cfg.Detection.Enabled, "backend": s.cfg.Detection.Backend},
+		"detection": gin.H{"enabled": cfg.Detection.Enabled, "backend": cfg.Detection.Backend},
 		"cameras":   safeCams,
 	})
+}
+
+// handleUpdateConfig applies partial config updates and persists to disk (Phase 9, admin-only).
+// PUT /api/v1/config  body: {"server":{"log_level":"..."},"storage":{"hot_retention_days":N,...}}
+// Only non-sensitive, runtime-safe fields are updatable; storage paths require a restart and
+// are therefore excluded. Returns the full sanitised config on success.
+func (s *Server) handleUpdateConfig(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+
+	var input struct {
+		Server *struct {
+			LogLevel string `json:"log_level"`
+		} `json:"server"`
+		Storage *struct {
+			HotRetentionDays  int `json:"hot_retention_days"`
+			ColdRetentionDays int `json:"cold_retention_days"`
+			SegmentDuration   int `json:"segment_duration"`
+		} `json:"storage"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	s.cfgMu.Lock()
+	// Stage all changes in a local copy so a validation failure never corrupts the live config.
+	oldCfg := *s.cfg // snapshot for rollback on save failure
+	cfgCopy := *s.cfg
+	if input.Server != nil && input.Server.LogLevel != "" {
+		cfgCopy.Server.LogLevel = input.Server.LogLevel
+	}
+	if input.Storage != nil {
+		if input.Storage.HotRetentionDays > 0 {
+			cfgCopy.Storage.HotRetentionDays = input.Storage.HotRetentionDays
+		}
+		if input.Storage.ColdRetentionDays > 0 {
+			cfgCopy.Storage.ColdRetentionDays = input.Storage.ColdRetentionDays
+		}
+		if input.Storage.SegmentDuration > 0 {
+			cfgCopy.Storage.SegmentDuration = input.Storage.SegmentDuration
+		}
+	}
+	if err := config.Validate(&cfgCopy); err != nil {
+		s.cfgMu.Unlock()
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	*s.cfg = cfgCopy // only assign after validation passes
+	s.cfgMu.Unlock()  // release lock before disk I/O so reads are not blocked
+
+	// Apply log level change immediately so operators see the effect without a restart.
+	if input.Server != nil && input.Server.LogLevel != "" && s.logLevel != nil {
+		s.logLevel.Set(parseSlogLevel(cfgCopy.Server.LogLevel))
+	}
+
+	if s.configPath != "" {
+		// Re-read the current config under a read lock for saving, instead of using
+		// the local cfgCopy. This ensures that when two concurrent PUT /config requests
+		// race, the disk always captures the latest in-memory state — preventing a
+		// stale cfgCopy from overwriting a newer config value written by a later request.
+		s.cfgMu.RLock()
+		toSave := *s.cfg
+		s.cfgMu.RUnlock()
+		if err := config.Save(s.configPath, &toSave); err != nil {
+			// Rollback in-memory config so it matches what's on disk.
+			s.cfgMu.Lock()
+			*s.cfg = oldCfg
+			s.cfgMu.Unlock()
+			if input.Server != nil && input.Server.LogLevel != "" && s.logLevel != nil {
+				s.logLevel.Set(parseSlogLevel(oldCfg.Server.LogLevel))
+			}
+			s.logger.Error("failed to save config", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save config"})
+			return
+		}
+	}
+
+	s.handleGetConfig(c)
 }
 
 // handleListCameras returns all cameras from the database with live pipeline status.
@@ -366,16 +632,17 @@ func (s *Server) handleCameraStatus(c *gin.Context) {
 
 // cameraInput is the request body for creating/updating a camera.
 type cameraInput struct {
-	Name       string `json:"name"`
-	Enabled    *bool  `json:"enabled"`
-	MainStream string `json:"main_stream"`
-	SubStream  string `json:"sub_stream"`
-	Record     *bool  `json:"record"`
-	Detect     *bool  `json:"detect"`
-	ONVIFHost  string `json:"onvif_host"`
-	ONVIFPort  int    `json:"onvif_port"`
-	ONVIFUser  string `json:"onvif_user"`
-	ONVIFPass  string `json:"onvif_pass"`
+	Name       string          `json:"name"`
+	Enabled    *bool           `json:"enabled"`
+	MainStream string          `json:"main_stream"`
+	SubStream  string          `json:"sub_stream"`
+	Record     *bool           `json:"record"`
+	Detect     *bool           `json:"detect"`
+	ONVIFHost  string          `json:"onvif_host"`
+	ONVIFPort  int             `json:"onvif_port"`
+	ONVIFUser  string          `json:"onvif_user"`
+	ONVIFPass  string          `json:"onvif_pass"`
+	Zones      json.RawMessage `json:"zones"` // Phase 9: nil = preserve existing zones (manager handles)
 }
 
 func (ci *cameraInput) toRecord() *camera.CameraRecord {
@@ -390,6 +657,7 @@ func (ci *cameraInput) toRecord() *camera.CameraRecord {
 		ONVIFPort:  ci.ONVIFPort,
 		ONVIFUser:  ci.ONVIFUser,
 		ONVIFPass:  ci.ONVIFPass,
+		Zones:      normalizeZonesRaw(ci.Zones), // nil when not provided or "null" — manager preserves existing zones
 	}
 	if ci.Enabled != nil {
 		rec.Enabled = *ci.Enabled
@@ -403,8 +671,26 @@ func (ci *cameraInput) toRecord() *camera.CameraRecord {
 	return rec
 }
 
+// requireAdmin returns true when the request is from an admin user (or auth is disabled).
+// Writes 403 and aborts when auth is enabled and the caller is not an admin.
+func (s *Server) requireAdmin(c *gin.Context) bool {
+	if s.authService == nil {
+		return true // auth disabled — all users are effectively admin
+	}
+	role, _ := c.Get(auth.CtxKeyRole)
+	if role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin role required"})
+		c.Abort()
+		return false
+	}
+	return true
+}
+
 // handleCreateCamera creates a new camera, syncs to go2rtc, and starts a pipeline.
 func (s *Server) handleCreateCamera(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	var input cameraInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON: " + err.Error()})
@@ -415,6 +701,10 @@ func (s *Server) handleCreateCamera(c *gin.Context) {
 	rec := input.toRecord()
 	if err := camera.ValidateCameraInput(rec); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateZonesJSON(input.Zones); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid zones: " + err.Error()})
 		return
 	}
 
@@ -438,6 +728,9 @@ func (s *Server) handleCreateCamera(c *gin.Context) {
 // handleUpdateCamera updates an existing camera and restarts the pipeline if needed.
 // The camera name comes from the URL path — the name field in the body is ignored.
 func (s *Server) handleUpdateCamera(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	name := c.Param("name")
 
 	var input cameraInput
@@ -451,6 +744,10 @@ func (s *Server) handleUpdateCamera(c *gin.Context) {
 	rec.Name = name
 	if err := camera.ValidateCameraInput(rec); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateZonesJSON(input.Zones); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid zones: " + err.Error()})
 		return
 	}
 
@@ -473,6 +770,9 @@ func (s *Server) handleUpdateCamera(c *gin.Context) {
 
 // handleDeleteCamera stops the pipeline, removes from go2rtc, and deletes from DB.
 func (s *Server) handleDeleteCamera(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	name := c.Param("name")
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -490,6 +790,50 @@ func (s *Server) handleDeleteCamera(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// handleCameraSnapshot grabs a single JPEG frame from go2rtc for the named camera
+// and returns it as image/jpeg. Used as the background image for the zone editor (Phase 9).
+// Prefers the sub-stream when configured (lower resolution → faster grab).
+// Returns 503 when the stream is not yet producing frames.
+// GET /api/v1/cameras/:name/snapshot
+func (s *Server) handleCameraSnapshot(c *gin.Context) {
+	name := c.Param("name")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+
+	cam, err := s.camRepo.GetByName(ctx, name)
+	if errors.Is(err, camera.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "camera not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to look up camera for snapshot", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// Disabled cameras have no go2rtc stream — bail early to avoid an 8s timeout.
+	if !cam.Enabled {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "camera is disabled"})
+		return
+	}
+
+	// Prefer sub-stream for snapshots — lower resolution, faster frame grab.
+	streamName := cam.Name
+	if cam.SubStream != "" {
+		streamName = cam.Name + "_sub"
+	}
+
+	jpegBytes, err := s.g2r.FrameJPEG(ctx, streamName)
+	if err != nil || len(jpegBytes) == 0 {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stream unavailable"})
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache")
+	c.Data(http.StatusOK, "image/jpeg", jpegBytes)
 }
 
 // handleListRecordings returns recording segments with optional filtering.
@@ -541,7 +885,13 @@ func (s *Server) handleListRecordings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusOK, recordings)
+	total, err := s.recRepo.Count(ctx, cameraName, start, end)
+	if err != nil {
+		s.logger.Error("failed to count recordings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"recordings": recordings, "total": total})
 }
 
 // handleGetRecording returns a single recording segment's metadata.
@@ -609,7 +959,9 @@ func (s *Server) handlePlayRecording(c *gin.Context) {
 		}
 		return
 	}
-	if !isUnderPath(resolvedPath, s.resolvedHotPath) && !isUnderPath(resolvedPath, s.resolvedColdPath) {
+	underHot := pathutil.IsUnderPath(resolvedPath, s.resolvedHotPath)
+	underCold := s.resolvedColdPath != "" && pathutil.IsUnderPath(resolvedPath, s.resolvedColdPath)
+	if !underHot && !underCold {
 		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path, "resolved", resolvedPath)
 		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		return
@@ -663,14 +1015,18 @@ func (s *Server) handleDeleteRecording(c *gin.Context) {
 	if err == nil {
 		resolvedPath = resolved
 		fileExists = true
-		if !isUnderPath(resolvedPath, s.resolvedHotPath) && !isUnderPath(resolvedPath, s.resolvedColdPath) {
+		underHot := pathutil.IsUnderPath(resolvedPath, s.resolvedHotPath)
+		underCold := s.resolvedColdPath != "" && pathutil.IsUnderPath(resolvedPath, s.resolvedColdPath)
+		if !underHot && !underCold {
 			s.logger.Warn("resolved recording path escapes storage boundary", "id", id, "path", rec.Path, "resolved", resolvedPath)
 			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 			return
 		}
 	} else if os.IsNotExist(err) {
 		// File already gone — lexical check on the raw path before allowing DB cleanup.
-		if !isUnderPath(cleanPath, s.resolvedHotPath) && !isUnderPath(cleanPath, s.resolvedColdPath) {
+		underHot := pathutil.IsUnderPath(cleanPath, s.resolvedHotPath)
+		underCold := s.resolvedColdPath != "" && pathutil.IsUnderPath(cleanPath, s.resolvedColdPath)
+		if !underHot && !underCold {
 			s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path)
 			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 			return
@@ -922,7 +1278,7 @@ func (s *Server) handleEventThumbnail(c *gin.Context) {
 		}
 		return
 	}
-	if !isUnderPath(resolvedPath, s.resolvedSnapshotPath) {
+	if !pathutil.IsUnderPath(resolvedPath, s.resolvedSnapshotPath) {
 		s.logger.Warn("thumbnail path outside snapshot directory", "id", id, "path", ev.Thumbnail, "resolved", resolvedPath)
 		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		return
@@ -982,11 +1338,12 @@ func (s *Server) handleDeleteEvent(c *gin.Context) {
 	// Validate path containment before removal to prevent an attacker who can
 	// write to the events table from deleting arbitrary files.
 	if ev.Thumbnail != "" {
-		resolved, resolveErr := filepath.EvalSymlinks(ev.Thumbnail)
+		cleanThumbnail := filepath.Clean(ev.Thumbnail)
+		resolved, resolveErr := filepath.EvalSymlinks(cleanThumbnail)
 		if resolveErr != nil && !os.IsNotExist(resolveErr) {
 			s.logger.Warn("could not resolve thumbnail path; skipping file removal",
 				"id", id, "path", ev.Thumbnail, "error", resolveErr)
-		} else if resolveErr == nil && !isUnderPath(resolved, s.resolvedSnapshotPath) {
+		} else if resolveErr == nil && !pathutil.IsUnderPath(resolved, s.resolvedSnapshotPath) {
 			s.logger.Warn("thumbnail path escapes snapshot directory; skipping file removal",
 				"id", id, "path", ev.Thumbnail)
 		} else if resolveErr == nil {
@@ -1074,7 +1431,9 @@ func (s *Server) handleEventStream(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no") // disable nginx proxy read buffering
 
-	ch := s.eventBus.Subscribe("*")
+	// Subscribe to "events.persisted" directly — only these events are forwarded to SSE clients.
+	// This avoids receiving the full event stream and discarding most of it in the handler.
+	ch := s.eventBus.Subscribe("events.persisted")
 	defer s.eventBus.Unsubscribe(ch)
 
 	// Send a comment to flush headers immediately so the client knows the connection is open.
@@ -1100,13 +1459,6 @@ func (s *Server) handleEventStream(c *gin.Context) {
 			if !ok {
 				return // event bus closed (server shutting down)
 			}
-			// Only forward "events.persisted" events — these carry the DB-persisted payload
-			// with correct schema and no absolute paths. Dropping other event types here is
-			// safe: recording/camera events are only meaningful in the Events page when they
-			// exist in the DB, and they emit their own "events.persisted" notification.
-			if event.Type != "events.persisted" {
-				continue
-			}
 			data, err := json.Marshal(event.Data)
 			if err != nil {
 				s.logger.Warn("failed to marshal SSE event payload", "error", err)
@@ -1120,20 +1472,67 @@ func (s *Server) handleEventStream(c *gin.Context) {
 	}
 }
 
-// isUnderPath checks if cleanPath is strictly contained within basePath.
-// Returns false if cleanPath equals basePath (the storage root itself is not a valid target).
-// Uses filepath.Rel for platform-safe path containment checking.
-func isUnderPath(cleanPath, basePath string) bool {
-	base := filepath.Clean(basePath)
-	rel, err := filepath.Rel(base, cleanPath)
-	if err != nil {
-		return false
+// normalizeZonesRaw converts a JSON "null" literal (or absent field) to Go nil so the
+// manager's zone-preservation logic (cam.Zones == nil → keep existing) fires for absent
+// and explicit-null payloads.
+// "[]" is intentionally NOT treated as nil — an explicit empty array clears all zones.
+// This lets clients distinguish "don't touch zones" (omit field / send null) from
+// "remove all zones" (send []).
+func normalizeZonesRaw(raw json.RawMessage) json.RawMessage {
+	if string(raw) == "null" {
+		return nil
 	}
-	return rel != "." && !strings.HasPrefix(rel, "..")
+	return raw
+}
+
+// validateZonesJSON validates that zones, when provided, is a valid JSON array of Zone objects.
+// nil/absent/null means "don't update zones" — manager preserves existing.
+// "[]" is valid and means "clear all zones".
+// Returns a descriptive error for malformed JSON or structurally invalid zone data.
+func validateZonesJSON(zones json.RawMessage) error {
+	if len(zones) == 0 || string(zones) == "null" {
+		return nil // absent or null → no update, manager preserves existing
+	}
+	if string(zones) == "[]" {
+		return nil // explicit empty array → clears all zones; structurally valid, no per-zone checks needed
+	}
+	var parsed []detection.Zone
+	if err := json.Unmarshal(zones, &parsed); err != nil {
+		return fmt.Errorf("zones must be a JSON array of zone objects: %w", err)
+	}
+	for i, z := range parsed {
+		if z.ID == "" {
+			return fmt.Errorf("zone[%d]: id is required", i)
+		}
+		if z.Name == "" {
+			return fmt.Errorf("zone[%d]: name is required", i)
+		}
+		if z.Type != detection.ZoneInclude && z.Type != detection.ZoneExclude {
+			return fmt.Errorf("zone[%d]: type must be %q or %q", i, detection.ZoneInclude, detection.ZoneExclude)
+		}
+		if len(z.Points) < 3 {
+			return fmt.Errorf("zone[%d]: polygon must have at least 3 points", i)
+		}
+		for j, pt := range z.Points {
+			if pt.X < 0 || pt.X > 1 || pt.Y < 0 || pt.Y > 1 {
+				return fmt.Errorf("zone[%d] point[%d]: x and y must be normalised to [0.0, 1.0]", i, j)
+			}
+		}
+	}
+	return nil
 }
 
 // validateWebhookURL checks that a webhook token is a well-formed HTTP/HTTPS URL.
-// Blocks file://, ftp://, and other schemes to prevent SSRF via the webhook sender.
+// Blocks file://, ftp://, and other schemes, and also blocks loopback/private
+// addresses to prevent SSRF attacks that could reach go2rtc (127.0.0.1:1984)
+// or other internal services.
+//
+// DNS rebinding mitigation: for hostname-based URLs (not literal IPs), the
+// hostname is also resolved and each returned address is checked. This removes
+// the common attack vector where a domain is registered pointing to a public IP
+// at validation time and later re-pointed to a private IP before delivery.
+// Full prevention of rebinding at delivery time would require re-validation on
+// every webhook call, which is out of scope here.
 func validateWebhookURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -1144,6 +1543,28 @@ func validateWebhookURL(rawURL string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("webhook URL must include a host")
+	}
+	hostname := u.Hostname()
+	switch hostname {
+	case "localhost", "::1", "0.0.0.0":
+		return fmt.Errorf("webhook URL must not target localhost")
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("webhook URL must not target private or loopback addresses")
+		}
+	} else {
+		// Hostname — resolve and check all returned addresses to mitigate DNS rebinding.
+		addrs, lookupErr := net.LookupHost(hostname)
+		if lookupErr == nil {
+			for _, addr := range addrs {
+				resolved := net.ParseIP(addr)
+				if resolved != nil && (resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast()) {
+					return fmt.Errorf("webhook URL resolves to a private or loopback address")
+				}
+			}
+		}
+		// If DNS lookup fails, allow the URL — the webhook delivery will fail gracefully.
 	}
 	return nil
 }
@@ -1212,6 +1633,9 @@ func (s *Server) handleCreateNotifToken(c *gin.Context) {
 	}
 
 	userID := s.notifUserID(c)
+	if userID < 0 {
+		return // notifUserID already aborted with 500
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
@@ -1231,6 +1655,9 @@ func (s *Server) handleListNotifTokens(c *gin.Context) {
 		return
 	}
 	userID := s.notifUserID(c)
+	if userID < 0 {
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
@@ -1256,6 +1683,9 @@ func (s *Server) handleDeleteNotifToken(c *gin.Context) {
 	}
 
 	userID := s.notifUserID(c)
+	if userID < 0 {
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
@@ -1278,6 +1708,9 @@ func (s *Server) handleListNotifPrefs(c *gin.Context) {
 		return
 	}
 	userID := s.notifUserID(c)
+	if userID < 0 {
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
@@ -1313,6 +1746,8 @@ func (s *Server) handleUpsertNotifPref(c *gin.Context) {
 	validEventTypes := map[string]bool{
 		"*":                   true,
 		"detection":           true,
+		"face_match":          true, // Phase 13 (R11)
+		"audio_detection":     true, // Phase 13 (R12)
 		"camera.offline":      true,
 		"camera.online":       true,
 		"camera.connected":    true,
@@ -1360,6 +1795,9 @@ func (s *Server) handleDeleteNotifPref(c *gin.Context) {
 	}
 
 	userID := s.notifUserID(c)
+	if userID < 0 {
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
@@ -1392,6 +1830,9 @@ func (s *Server) handleListNotifLog(c *gin.Context) {
 	}
 
 	userID := s.notifUserID(c)
+	if userID < 0 {
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
@@ -1402,4 +1843,528 @@ func (s *Server) handleListNotifLog(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, logs)
+}
+
+// ─── Remote access handlers (Phase 12, CG11, R8) ────────────────────────────
+
+// handleRelayICEServers returns ICE server config for WebRTC peer connections (Phase 12, CG11).
+// GET /api/v1/relay/ice-servers
+// Always returns the STUN server; includes TURN credentials when relay.enabled=true.
+//
+// Design decision: TURN credentials are served to ALL authenticated users (not admin-only).
+// This is intentional — every user (including non-admin viewers) needs TURN relay access
+// for remote WebRTC streaming when symmetric NAT blocks direct P2P. The credentials are
+// long-lived shared secrets from the config, matching go2rtc's own ice_servers config.
+// Future improvement: mint short-lived TURN credentials per RFC 5766 §9 (time-limited HMAC)
+// instead of exposing the shared secret. For now this is acceptable because:
+// 1. The endpoint requires authentication (JWT cookie).
+// 2. TURN abuse is bounded by coturn's bandwidth/allocation limits.
+// 3. The credentials only grant relay access, not admin access to the NVR.
+// The mobile app passes the returned list to flutter_webrtc's RTCConfiguration.
+func (s *Server) handleRelayICEServers(c *gin.Context) {
+	type iceServer struct {
+		URLs       []string `json:"urls"`
+		Username   string   `json:"username,omitempty"`
+		Credential string   `json:"credential,omitempty"`
+	}
+	cfg := s.snapConfig()
+	servers := []iceServer{
+		{URLs: []string{cfg.Relay.STUNServer}},
+	}
+	if cfg.Relay.Enabled && cfg.Relay.TURNServer != "" {
+		servers = append(servers, iceServer{
+			URLs:       []string{cfg.Relay.TURNServer},
+			Username:   cfg.Relay.TURNUser,
+			Credential: cfg.Relay.TURNPass,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"ice_servers": servers})
+}
+
+// handlePairingQR generates a short-lived pairing code for QR-based mobile pairing (Phase 12, CG11).
+// POST /api/v1/pairing/qr  (admin only)
+// Returns {"code":"<uuid>","expires_at":"<RFC3339>"} — the web UI encodes this into a QR image.
+// The mobile app scans the QR and calls POST /pairing/redeem to exchange the code for a session.
+func (s *Server) handlePairingQR(c *gin.Context) {
+	// Pairing requires auth to be enabled — without it there's no user/session model
+	// and the FK to pairing_codes.user_id would reference a nonexistent user (Issue #6).
+	if s.authService == nil {
+		c.JSON(http.StatusOK, gin.H{"message": "auth disabled — pairing not available"})
+		return
+	}
+	if !s.requireAdmin(c) {
+		return
+	}
+	userID := s.notifUserID(c)
+	if userID < 0 {
+		return // notifUserID already aborted with 500
+	}
+
+	// Generate UUID v4 using crypto/rand (no new dependencies).
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		s.logger.Error("pairing: rand.Read failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate pairing code"})
+		return
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // UUID version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant bits
+	code := fmt.Sprintf("%s-%s-%s-%s-%s",
+		hex.EncodeToString(b[0:4]),
+		hex.EncodeToString(b[4:6]),
+		hex.EncodeToString(b[6:8]),
+		hex.EncodeToString(b[8:10]),
+		hex.EncodeToString(b[10:16]),
+	)
+
+	expiresAt := time.Now().UTC().Add(15 * time.Minute)
+
+	// Purge expired codes before inserting — prevents unbounded table growth on repeated
+	// calls. Uses a short independent timeout so a slow DELETE cannot starve the INSERT.
+	delCtx, delCancel := context.WithTimeout(c.Request.Context(), time.Second)
+	_, _ = s.db.ExecContext(delCtx,
+		`DELETE FROM pairing_codes WHERE expires_at < ?`,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	delCancel()
+
+	insCtx, insCancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer insCancel()
+
+	_, err := s.db.ExecContext(insCtx,
+		`INSERT INTO pairing_codes (code, user_id, expires_at) VALUES (?, ?, ?)`,
+		code, userID, expiresAt.Format(time.RFC3339),
+	)
+	if err != nil {
+		s.logger.Error("pairing: insert failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate pairing code"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"code":       code,
+		"expires_at": expiresAt.Format(time.RFC3339),
+	})
+}
+
+// handlePairingRedeem exchanges a valid pairing code for a session (Phase 12, CG11).
+// POST /api/v1/pairing/redeem  body: {"code":"<uuid>"}
+// Public endpoint — the mobile app has no auth session when it calls this.
+// On success, sets httpOnly auth cookies (same as /auth/login) and marks the code as used.
+// Returns 401 for invalid/expired/already-used codes.
+// Rate-limited with the same limiter as /auth/login to prevent brute-force enumeration.
+func (s *Server) handlePairingRedeem(c *gin.Context) {
+	if s.authService == nil {
+		c.JSON(http.StatusOK, gin.H{"message": "auth disabled"})
+		return
+	}
+
+	// Rate limit — use a separate key namespace from /auth/login so that repeated
+	// failed pairing attempts don't lock out login from the same IP (CG6).
+	ip := c.ClientIP()
+	if !s.loginLimiter.allow(ip + "_pairing") {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts, try again later"})
+		return
+	}
+
+	var req struct {
+		Code string `json:"code" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	// Atomic claim + user lookup via RETURNING: marks used_at and retrieves user_id in a
+	// single statement, eliminating the TOCTOU race and the "code consumed but lookup failed"
+	// failure mode of the previous two-query approach.
+	now := time.Now().UTC().Format(time.RFC3339)
+	var userID int
+	err := s.db.QueryRowContext(ctx,
+		`UPDATE pairing_codes SET used_at = ?
+		 WHERE code = ? AND used_at IS NULL AND expires_at > ?
+		 RETURNING user_id`,
+		now, req.Code, now,
+	).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired pairing code"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("pairing: claim failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// Issue session tokens for the user who generated the code.
+	pair, pairErr := s.authService.IssueTokenPairForUserID(ctx, userID)
+	if pairErr != nil {
+		s.logger.Error("pairing: token issue failed", "error", pairErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	s.loginLimiter.reset(ip)
+	auth.SetTokenCookies(c, pair, s.snapConfig().Auth.SecureCookie)
+	c.JSON(http.StatusOK, gin.H{"message": "paired"})
+}
+
+// ─── OIDC SSO handlers (Phase 7, CG6) ───────────────────────────────────────
+
+// handleOIDCLogin initiates the OIDC authorization code flow.
+// GET /api/v1/auth/oidc/login — redirects the browser to the identity provider.
+// Only reachable when oidcProvider is non-nil (s.oidcProvider != nil in registerRoutes).
+func (s *Server) handleOIDCLogin(c *gin.Context) {
+	url, err := s.oidcProvider.AuthURL()
+	if err != nil {
+		s.logger.Error("OIDC: failed to generate auth URL", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "OIDC unavailable"})
+		return
+	}
+	c.Redirect(http.StatusFound, url)
+}
+
+// handleOIDCCallback handles the authorization code redirect from the identity provider.
+// GET /api/v1/auth/oidc/callback?code=...&state=...
+// Validates state, exchanges the code, finds or provisions a local user, and sets session cookies.
+func (s *Server) handleOIDCCallback(c *gin.Context) {
+	code := c.Query("code")
+	state := c.Query("state")
+	if code == "" || state == "" {
+		c.Redirect(http.StatusFound, "/login?error=oidc_missing_params")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	sub, username, email, err := s.oidcProvider.Exchange(ctx, code, state)
+	if err != nil {
+		s.logger.Warn("OIDC callback: token exchange failed", "error", err)
+		c.Redirect(http.StatusFound, "/login?error=oidc_failed")
+		return
+	}
+
+	pair, err := s.authService.OIDCLoginOrCreate(ctx, sub, username, email)
+	if err != nil {
+		s.logger.Error("OIDC callback: login/create failed", "error", err)
+		c.Redirect(http.StatusFound, "/login?error=oidc_failed")
+		return
+	}
+
+	auth.SetTokenCookies(c, pair, s.snapConfig().Auth.SecureCookie)
+	c.Redirect(http.StatusFound, "/live")
+}
+
+// ─── Face recognition handlers (Phase 13, R11) ──────────────────────────────
+
+// handleListFaces returns all enrolled faces (without embeddings).
+// GET /api/v1/faces
+func (s *Server) handleListFaces(c *gin.Context) {
+	if s.faceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "face recognition not configured"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	faces, err := s.faceRepo.List(ctx)
+	if err != nil {
+		s.logger.Error("failed to list faces", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"faces": faces})
+}
+
+// handleGetFace returns a single enrolled face by ID.
+// GET /api/v1/faces/:id
+func (s *Server) handleGetFace(c *gin.Context) {
+	if s.faceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "face recognition not configured"})
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid face ID"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	face, err := s.faceRepo.GetByID(ctx, id)
+	if errors.Is(err, detection.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "face not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to get face", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, face)
+}
+
+// handleCreateFace enrolls a new face by receiving a name and a JPEG reference photo.
+// The embedding is extracted via the sentinel-infer face embedding endpoint.
+// POST /api/v1/faces — multipart/form-data: name (text), image (JPEG file)
+// For now, accepts a pre-computed embedding JSON array if the inference endpoint
+// is not yet available, allowing manual enrollment via API.
+func (s *Server) handleCreateFace(c *gin.Context) {
+	if s.faceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "face recognition not configured"})
+		return
+	}
+	if !s.requireAdmin(c) {
+		return
+	}
+
+	var req struct {
+		Name      string    `json:"name" binding:"required"`
+		Embedding []float32 `json:"embedding" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name and embedding are required"})
+		return
+	}
+	if len(req.Name) == 0 || len(req.Name) > 128 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must be 1-128 characters"})
+		return
+	}
+	// ArcFace embeddings are 512-dim; enforce a reasonable range to prevent
+	// storage abuse (a 1M-element array would bloat the BLOB and CPU in cosine similarity).
+	if len(req.Embedding) < 64 || len(req.Embedding) > 2048 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "embedding must have 64-2048 dimensions"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	face, err := s.faceRepo.Create(ctx, req.Name, req.Embedding, "")
+	if err != nil {
+		s.logger.Error("failed to create face", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusCreated, face)
+}
+
+// handleUpdateFace renames an enrolled face.
+// PUT /api/v1/faces/:id   body: {"name":"new name"}
+func (s *Server) handleUpdateFace(c *gin.Context) {
+	if s.faceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "face recognition not configured"})
+		return
+	}
+	if !s.requireAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid face ID"})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	if len(req.Name) == 0 || len(req.Name) > 128 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must be 1-128 characters"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := s.faceRepo.Update(ctx, id, req.Name); err != nil {
+		if errors.Is(err, detection.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "face not found"})
+			return
+		}
+		s.logger.Error("failed to update face", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	// Return the updated face record — consistent with other update endpoints.
+	updated, getErr := s.faceRepo.GetByID(ctx, id)
+	if getErr != nil {
+		s.logger.Error("failed to fetch updated face", "id", id, "error", getErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, updated)
+}
+
+// handleDeleteFace removes an enrolled face by ID.
+// DELETE /api/v1/faces/:id
+func (s *Server) handleDeleteFace(c *gin.Context) {
+	if s.faceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "face recognition not configured"})
+		return
+	}
+	if !s.requireAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid face ID"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := s.faceRepo.Delete(ctx, id); err != nil {
+		if errors.Is(err, detection.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "face not found"})
+			return
+		}
+		s.logger.Error("failed to delete face", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// ---------- Migration / Import (Phase 14, R15) ----------
+
+// parseImportFile reads the uploaded file and format, then returns a parsed ImportResult.
+func (s *Server) parseImportFile(c *gin.Context) (*importers.ImportResult, bool) {
+	format := c.PostForm("format")
+	if format == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "format is required (blue_iris or frigate)"})
+		return nil, false
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file upload is required"})
+		return nil, false
+	}
+	f, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read uploaded file"})
+		return nil, false
+	}
+	defer f.Close()
+
+	// Use io.ReadAll with LimitReader — f.Read may return fewer bytes than
+	// file.Size (partial read), and file.Size can be spoofed by the client.
+	data, err := io.ReadAll(io.LimitReader(f, 5*1024*1024+1))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read file contents"})
+		return nil, false
+	}
+	if len(data) > 5*1024*1024 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file exceeds 5MB limit"})
+		return nil, false
+	}
+
+	var result *importers.ImportResult
+	switch format {
+	case "blue_iris":
+		result = importers.ParseBlueIris(data)
+	case "frigate":
+		result = importers.ParseFrigate(data)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported format — use 'blue_iris' or 'frigate'"})
+		return nil, false
+	}
+	return result, true
+}
+
+// handleImportPreview parses an uploaded config file and returns a preview of
+// what would be imported — without touching the database (dry run).
+// POST /api/v1/import/preview — multipart/form-data: format (text), file (upload)
+func (s *Server) handleImportPreview(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+	result, ok := s.parseImportFile(c)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// handleImportExecute parses the uploaded file and creates cameras in the database.
+// Cameras that already exist (by name) are skipped with a warning.
+// POST /api/v1/import — multipart/form-data: format (text), file (upload)
+func (s *Server) handleImportExecute(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+	result, ok := s.parseImportFile(c)
+	if !ok {
+		return
+	}
+	if len(result.Cameras) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"imported": 0,
+			"skipped":  0,
+			"errors":   result.Errors,
+			"warnings": result.Warnings,
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	imported := 0
+	skipped := 0
+	// Copy parse errors into a separate slice — appending to result.Errors would
+	// also append to result.Warnings via shared backing array aliasing.
+	importErrors := make([]string, len(result.Errors))
+	copy(importErrors, result.Errors)
+
+	for _, cam := range result.Cameras {
+		rec := &camera.CameraRecord{
+			Name:       cam.Name,
+			Enabled:    cam.Enabled,
+			MainStream: cam.MainStream,
+			SubStream:  cam.SubStream,
+			Record:     cam.Record,
+			Detect:     cam.Detect,
+			ONVIFHost:  cam.ONVIFHost,
+			ONVIFPort:  cam.ONVIFPort,
+			ONVIFUser:  cam.ONVIFUser,
+			ONVIFPass:  cam.ONVIFPass,
+		}
+
+		_, err := s.camManager.AddCamera(ctx, rec)
+		if err != nil {
+			if errors.Is(err, camera.ErrDuplicate) {
+				skipped++
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("camera %q: already exists, skipped", cam.Name))
+			} else {
+				importErrors = append(importErrors,
+					fmt.Sprintf("camera %q: %v", cam.Name, err))
+			}
+			continue
+		}
+		imported++
+	}
+
+	s.logger.Info("import completed",
+		"format", result.Format,
+		"imported", imported,
+		"skipped", skipped,
+		"errors", len(importErrors),
+	)
+
+	c.JSON(http.StatusOK, gin.H{
+		"imported": imported,
+		"skipped":  skipped,
+		"errors":   importErrors,
+		"warnings": result.Warnings,
+	})
 }

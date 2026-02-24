@@ -3,7 +3,7 @@
  * Shows thumbnail, timestamp, event type, label, confidence, and a delete button.
  */
 import { useState } from "react";
-import { Trash2, ImageOff, ShieldAlert, Camera } from "lucide-react";
+import { Trash2, ImageOff, ShieldAlert, Camera, User, Volume2 } from "lucide-react";
 import { api, EventRecord } from "../../api/client";
 
 interface Props {
@@ -79,13 +79,17 @@ export default function EventCard({ event, onDelete }: Props) {
         <div className="flex items-center gap-2 flex-wrap">
           {event.type === "detection" ? (
             <ShieldAlert className="w-4 h-4 text-sentinel-500 shrink-0" />
+          ) : event.type === "face_match" ? (
+            <User className="w-4 h-4 text-purple-400 shrink-0" />
+          ) : event.type === "audio_detection" ? (
+            <Volume2 className="w-4 h-4 text-amber-400 shrink-0" />
           ) : (
             <Camera className="w-4 h-4 text-muted shrink-0" />
           )}
           <span className="text-sm font-medium truncate flex-1">
             {event.label || event.type}
           </span>
-          {event.type === "detection" && event.confidence > 0 && (
+          {(event.type === "detection" || event.type === "face_match" || event.type === "audio_detection") && event.confidence > 0 && (
             <span
               className={`text-xs px-1.5 py-0.5 rounded font-mono ${confidenceColor(event.confidence)}`}
             >

@@ -5,6 +5,7 @@ package camera
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -32,31 +33,34 @@ const (
 
 // PipelineStatus is a snapshot of a camera pipeline's current state.
 type PipelineStatus struct {
-	State       State      `json:"state"`
-	MainStream  bool       `json:"main_stream_active"`
-	SubStream   bool       `json:"sub_stream_active"`
-	Recording   bool       `json:"recording"`
-	Detecting   bool       `json:"detecting"`
-	LastError   string     `json:"last_error,omitempty"`
-	ConnectedAt *time.Time `json:"connected_at,omitempty"` // pointer so unset serializes as null, not "0001-01-01"
+	State          State      `json:"state"`
+	MainStream     bool       `json:"main_stream_active"`
+	SubStream      bool       `json:"sub_stream_active"`
+	Recording      bool       `json:"recording"`
+	Detecting      bool       `json:"detecting"`
+	AudioActive    bool       `json:"audio_active"`
+	LastError      string     `json:"last_error,omitempty"`
+	ConnectedAt    *time.Time `json:"connected_at,omitempty"` // pointer so unset serializes as null, not "0001-01-01"
 }
 
 // Pipeline manages the full lifecycle of a single camera:
 //   - Monitors go2rtc stream health (producers present = stream active)
 //   - Manages ffmpeg recording subprocess when stream is active and cam.Record=true (CG4, CG9)
 //   - Manages AI detection pipeline when stream is active and cam.Detect=true (R3, Phase 5)
+//   - Manages audio classification pipeline when audio_classification.enabled=true (Phase 13, R12)
 type Pipeline struct {
-	cam         *CameraRecord
-	g2r         *go2rtc.Client
-	bus         *eventbus.Bus
-	recorder    *Recorder                   // nil if cam.Record is false
-	detPipeline *detection.DetectionPipeline // nil if cam.Detect is false or detection disabled
-	logger      *slog.Logger
-	ctx         context.Context    // cancelled by Stop() to unblock in-flight go2rtc calls
-	ctxCancel   context.CancelFunc
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-	startDone   chan struct{} // closed when Start() returns; used to wait for full pipeline exit
+	cam           *CameraRecord
+	g2r           *go2rtc.Client
+	bus           *eventbus.Bus
+	recorder      *Recorder                    // nil if cam.Record is false
+	detPipeline   *detection.DetectionPipeline  // nil if cam.Detect is false or detection disabled
+	audioPipeline *detection.AudioPipeline      // nil if audio_classification.enabled is false (Phase 13)
+	logger        *slog.Logger
+	ctx           context.Context    // cancelled by Stop() to unblock in-flight go2rtc calls
+	ctxCancel     context.CancelFunc
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+	startDone     chan struct{} // closed when Start() returns; used to wait for full pipeline exit
 
 	// recordingStartFailed suppresses repeated error logs after first recorder.Start() failure.
 	// Only accessed from the Start() goroutine's health check loop; no mutex needed.
@@ -71,6 +75,17 @@ type Pipeline struct {
 
 	mu     sync.RWMutex
 	status PipelineStatus
+}
+
+// PipelineDeps holds optional dependencies injected into each camera pipeline.
+// Using a struct avoids an ever-growing parameter list as new features are added.
+type PipelineDeps struct {
+	// Face recognition (Phase 13, R11) — nil when face_recognition.enabled=false.
+	FaceRecognizer detection.FaceRecognizer
+	FaceRepo       *detection.FaceRepository
+
+	// Audio classification (Phase 13, R12) — nil when audio_classification.enabled=false.
+	AudioClassifier detection.AudioClassifier
 }
 
 // NewPipeline creates a pipeline for a single camera in idle state.
@@ -89,6 +104,7 @@ func NewPipeline(
 	detCfg config.DetectionConfig,
 	bus *eventbus.Bus,
 	logger *slog.Logger,
+	deps *PipelineDeps,
 ) *Pipeline {
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	p := &Pipeline{
@@ -110,20 +126,58 @@ func NewPipeline(
 	// Create detection pipeline when the camera has detect=true AND a global detector
 	// has been configured. The sub stream is preferred (lower resolution → faster inference);
 	// falls back to the main stream when no sub stream is configured.
+	// R2 "Messy Stream Handling": when a sub-stream is configured, the main stream name
+	// is passed as a fallback so that detection continues even when the sub-stream is
+	// corrupted or unavailable.
 	if cam.Detect && detector != nil {
 		streamName := cam.Name
+		fallbackStreamName := ""
 		if cam.SubStream != "" {
 			streamName = cam.Name + "_sub"
+			fallbackStreamName = cam.Name // R2: main stream fallback
 		}
 		snapshotDir := filepath.Join(detCfg.SnapshotPath, SanitizeName(cam.Name))
+		var zones []detection.Zone
+		if len(cam.Zones) > 0 && string(cam.Zones) != "[]" {
+			if err := json.Unmarshal(cam.Zones, &zones); err != nil {
+				logger.Error("failed to parse camera zones; detection will apply to full frame",
+					"camera", cam.Name, "error", err)
+			}
+		}
 		p.detPipeline = detection.NewDetectionPipeline(
-			detection.CameraInfo{ID: cam.ID, Name: cam.Name},
+			detection.CameraInfo{ID: cam.ID, Name: cam.Name, Zones: zones},
 			streamName,
+			fallbackStreamName,
 			g2r,
 			detector,
 			snapshotDir,
 			detCfg.ConfidenceThresholdValue(),
 			time.Duration(detCfg.FrameInterval)*time.Second,
+			bus,
+			logger,
+		)
+
+		// Wire face recognition into the detection pipeline (Phase 13, R11).
+		if deps != nil && deps.FaceRecognizer != nil && deps.FaceRepo != nil && detCfg.FaceRecognition.Enabled {
+			p.detPipeline.SetFaceRecognition(
+				deps.FaceRecognizer,
+				deps.FaceRepo,
+				detCfg.FaceRecognition.MatchThreshold,
+				detCfg.FaceRecognition.MaxFacesPerFrame,
+			)
+		}
+	}
+
+	// Create audio classification pipeline when enabled (Phase 13, R12).
+	// The RTSP URL points at go2rtc's re-stream so ffmpeg can extract the audio track.
+	if deps != nil && deps.AudioClassifier != nil && detCfg.AudioClassification.Enabled {
+		audioRTSPURL := rtspBase + "/" + cam.Name
+		p.audioPipeline = detection.NewAudioPipeline(
+			detection.CameraInfo{ID: cam.ID, Name: cam.Name},
+			deps.AudioClassifier,
+			detCfg.AudioClassification.ConfidenceThreshold,
+			time.Duration(detCfg.AudioClassification.SampleInterval)*time.Second,
+			audioRTSPURL,
 			bus,
 			logger,
 		)
@@ -155,7 +209,7 @@ func (p *Pipeline) Start() {
 		case <-ticker.C:
 			p.checkStreamHealth()
 		case <-p.stopCh:
-			// Stop recording and detection before setting final state.
+			// Stop recording, detection, and audio before setting final state.
 			// Detection Stop() blocks until the goroutine exits (bounded by 10s ctx
 			// timeout on the in-flight processFrame call) — acceptable for shutdown.
 			if p.recorder != nil && p.recorder.IsActive() {
@@ -164,12 +218,16 @@ func (p *Pipeline) Start() {
 			if p.detPipeline != nil && p.detPipeline.IsActive() {
 				p.detPipeline.Stop()
 			}
+			if p.audioPipeline != nil && p.audioPipeline.IsActive() {
+				p.audioPipeline.Stop()
+			}
 			p.setStatus(func(s *PipelineStatus) {
 				s.State = StateStopped
 				s.MainStream = false
 				s.SubStream = false
 				s.Recording = false
 				s.Detecting = false
+				s.AudioActive = false
 			})
 			return
 		}
@@ -208,6 +266,12 @@ func (p *Pipeline) checkStreamHealth() {
 				s.Detecting = false
 			})
 		}
+		if p.audioPipeline != nil && p.audioPipeline.IsActive() {
+			p.audioPipeline.Stop()
+			p.setStatus(func(s *PipelineStatus) {
+				s.AudioActive = false
+			})
+		}
 		return
 	}
 
@@ -228,12 +292,17 @@ func (p *Pipeline) checkStreamHealth() {
 	var needsStopRecording bool
 	var needsStartDetection bool
 	var needsStopDetection bool
+	var needsStartAudio bool
+	var needsStopAudio bool
 	var publishConnected bool
 	var publishDisconnected bool
 
-	recorderActive := p.recorder != nil && p.recorder.IsActive()
-
 	p.setStatus(func(s *PipelineStatus) {
+		// Sample recorderActive inside the closure (under p.mu) to avoid a TOCTOU
+		// window where ffmpeg crashes between the sample and the status update,
+		// which would show "recording" for one 5-second tick incorrectly.
+		recorderActive := p.recorder != nil && p.recorder.IsActive()
+
 		s.MainStream = mainActive
 		s.SubStream = subActive
 
@@ -263,16 +332,26 @@ func (p *Pipeline) checkStreamHealth() {
 			// Decide detection state (independent of recording state).
 			// Use s.Detecting (the authoritative status field, under the mutex) rather than
 			// IsActive() (which has a TOCTOU window between Start() return and goroutine
-			// scheduling). Only start detection if the stream the pipeline actually reads
-			// from is active — when a sub-stream is configured, detection runs off the
-			// sub-stream; starting when only the main is active would cause persistent
-			// FrameJPEG errors against an offline sub-stream.
+			// scheduling).
+			//
+			// R2 "Messy Stream Handling": when a sub-stream is configured, detection prefers
+			// it (lower resolution = faster inference). But if the sub-stream is unavailable
+			// while the main stream IS active, detection starts anyway — the DetectionPipeline
+			// has a fallback stream name and will transparently grab frames from the main
+			// stream. This prevents detection from being completely offline just because the
+			// sub-stream is corrupted or misconfigured.
 			detStreamActive := mainActive
 			if p.cam.SubStream != "" {
-				detStreamActive = subActive
+				// Prefer sub-stream, but fall back to main stream (R2 messy stream handling)
+				detStreamActive = subActive || mainActive
 			}
 			if p.detPipeline != nil && !s.Detecting && detStreamActive {
 				needsStartDetection = true
+			}
+
+			// Audio pipeline uses the main stream (audio track).
+			if p.audioPipeline != nil && !p.audioPipeline.IsActive() && mainActive {
+				needsStartAudio = true
 			}
 		} else if mainExists && mainInfo != nil {
 			// Stream is registered but has no producer — camera disconnected
@@ -290,6 +369,9 @@ func (p *Pipeline) checkStreamHealth() {
 				needsStopDetection = true
 				s.Detecting = false
 			}
+			if p.audioPipeline != nil && p.audioPipeline.IsActive() {
+				needsStopAudio = true
+			}
 		} else {
 			// Stream not registered in go2rtc — needs re-sync (go2rtc restart recovery)
 			if s.State == StateStreaming || s.State == StateRecording {
@@ -306,6 +388,9 @@ func (p *Pipeline) checkStreamHealth() {
 			if s.Detecting {
 				needsStopDetection = true
 				s.Detecting = false
+			}
+			if p.audioPipeline != nil && p.audioPipeline.IsActive() {
+				needsStopAudio = true
 			}
 		}
 	})
@@ -342,6 +427,13 @@ func (p *Pipeline) checkStreamHealth() {
 		p.detStartFailed = false
 		p.detFailCount = 0
 		p.logger.Info("detection stopped (stream lost)")
+	}
+	if needsStopAudio && p.audioPipeline != nil {
+		p.audioPipeline.Stop()
+		p.setStatus(func(s *PipelineStatus) {
+			s.AudioActive = false
+		})
+		p.logger.Info("audio classification stopped (stream lost)")
 	}
 
 	// Auto-recovery: re-register streams in go2rtc after a restart.
@@ -393,6 +485,15 @@ func (p *Pipeline) checkStreamHealth() {
 			s.Detecting = true
 		})
 		p.logger.Info("detection started")
+	}
+
+	// Start audio classification pipeline (Phase 13, R12).
+	if needsStartAudio && p.audioPipeline != nil {
+		p.audioPipeline.Start()
+		p.setStatus(func(s *PipelineStatus) {
+			s.AudioActive = true
+		})
+		p.logger.Info("audio classification started")
 	}
 
 	// Periodically ensure next hour's directory exists (runs every health check = 5s, cheap no-op)

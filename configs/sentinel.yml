@@ -52,6 +52,16 @@ detection:
   gpu_device: "auto"           # auto | /dev/dri/renderD128 | cuda:0 | etc.
   confidence_threshold: 0.6    # Minimum confidence [0.0–1.0] to publish a detection event
 
+  # Phase 13: Advanced AI features (R11, R12)
+  # face_recognition:              # Opt-in face identification (requires ArcFace ONNX model in sentinel-infer)
+  #   enabled: false               # true = run face matching on "person" detections
+  #   match_threshold: 0.6         # Cosine similarity threshold [0.0–1.0]; higher = stricter
+  #   max_faces_per_frame: 5       # Limit face crops per frame to reduce inference load
+  # audio_classification:          # Opt-in audio event detection (requires YAMNet ONNX model)
+  #   enabled: false               # true = classify audio from camera streams
+  #   confidence_threshold: 0.7    # Minimum classification score to publish event
+  #   sample_interval: 3           # Seconds between audio samples per camera
+
 go2rtc:
   api_url: "http://go2rtc:1984"     # Override with GO2RTC_API env var
   rtsp_url: "rtsp://go2rtc:8554"    # Container-internal port; host port is 8555. Override with GO2RTC_RTSP env var.
@@ -74,3 +84,10 @@ watchdog:
   enabled: true
   health_interval: 30          # Seconds between health checks
   restart_delay: 5             # Seconds to wait before restarting a failed component
+
+# relay:                          # Phase 12: remote access via TURN relay (CG11, R8)
+#   enabled: false                # true = include TURN credentials in /relay/ice-servers API
+#   stun_server: "stun:stun.l.google.com:19302"
+#   turn_server: "turn:coturn:3478"   # or your own server, e.g. "turn:yourserver.example.com:3478"
+#   turn_user: "sentinel"
+#   turn_pass: "changeme"         # IMPORTANT: change this; must match coturn --user flag

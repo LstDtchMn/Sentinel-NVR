@@ -2,8 +2,14 @@
  * RecordingPlayer — HTML5 video player for recording segment playback (R6).
  * Uses standard <video src> with Range header support from the play endpoint.
  * Reports currentTime via requestAnimationFrame for smooth playhead tracking.
+ *
+ * Imperative handle (via forwardRef):
+ *   seekTo(seconds)      — seek within the current segment immediately
+ *   setInitialSeek(s)    — defer a seek applied when the next segment loads
+ * Callers (Playback.tsx) call setInitialSeek before changing the active segment
+ * so that timeline click-to-seek works across segment boundaries (R6).
  */
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle } from "react";
 import { Film } from "lucide-react";
 import { api, type TimelineSegment } from "../../api/client";
 import { formatWallClock } from "../../utils/time";
@@ -20,21 +26,38 @@ interface RecordingPlayerProps {
   className?: string;
 }
 
-export default function RecordingPlayer({
-  segment,
-  segments,
-  playbackRate,
-  onTimeUpdate,
-  onEnded,
-  onSegmentChange,
-  onPlaybackRateChange,
-  className = "",
-}: RecordingPlayerProps) {
+/** Imperative API exposed via ref so Playback.tsx can seek on timeline click (R6). */
+export interface RecordingPlayerHandle {
+  /** Seek within the currently-loaded segment immediately. */
+  seekTo(seconds: number): void;
+  /** Store an offset applied when the next segment finishes loading (cross-segment seek). */
+  setInitialSeek(seconds: number): void;
+}
+
+const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
+  function RecordingPlayer(
+    {
+      segment,
+      segments,
+      playbackRate,
+      onTimeUpdate,
+      onEnded,
+      onSegmentChange,
+      onPlaybackRateChange,
+      className = "",
+    }: RecordingPlayerProps,
+    ref,
+  ) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const rafRef = useRef<number | null>(null);
   // Ref mirrors playbackRate prop so the segment-load effect can read the
   // current speed without it being a dependency (which would reload the video).
   const playbackRateRef = useRef(playbackRate);
+  // Pending seek offset applied on next canplay event (cross-segment seek, R6).
+  const pendingSeekRef = useRef<number | null>(null);
+  // Ref mirrors onTimeUpdate so the rAF loop can call it without the callback
+  // identity being a dep that restarts the loop on every parent re-render.
+  const onTimeUpdateRef = useRef(onTimeUpdate);
   const [playing, setPlaying] = useState(false);
   const [videoTime, setVideoTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -48,25 +71,44 @@ export default function RecordingPlayer({
   // playbackRate is intentionally NOT in the dep array — the dedicated effect below
   // handles rate changes without reloading the video. The canplay event ensures the
   // rate sticks even if the browser resets it during media loading.
+  // pendingSeekRef (set by setInitialSeek) is consumed here for cross-segment seeks (R6).
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !segment) return;
+
+    // Consume pending seek before src changes so it applies to the incoming segment.
+    const seekOffset = pendingSeekRef.current;
+    pendingSeekRef.current = null;
 
     video.src = api.recordingPlayURL(segment.id);
     // Set rate immediately (may be reset by browser on src change) and again
     // on canplay once the media pipeline has initialised.
     video.playbackRate = playbackRateRef.current;
-    const onCanPlay = () => { video.playbackRate = playbackRateRef.current; };
+    const onCanPlay = () => {
+      video.playbackRate = playbackRateRef.current;
+      if (seekOffset !== null) {
+        video.currentTime = Math.max(0, Math.min(seekOffset, video.duration || 0));
+      }
+    };
     video.addEventListener("canplay", onCanPlay, { once: true });
+    // canplay may already have fired if the browser returned a cached response
+    // before addEventListener could register.  Apply the seek immediately in that case.
+    if (video.readyState >= 3) {
+      onCanPlay();
+      video.removeEventListener("canplay", onCanPlay);
+    }
     video.play().catch(() => {});
     return () => video.removeEventListener("canplay", onCanPlay);
   }, [segment?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keep the ref in sync so the segment-load effect always reads the latest speed.
+  // Keep rate ref in sync so the segment-load effect always reads the latest speed.
   useEffect(() => {
     playbackRateRef.current = playbackRate;
     if (videoRef.current) videoRef.current.playbackRate = playbackRate;
   }, [playbackRate]);
+
+  // Keep onTimeUpdate ref in sync without it being a rAF-loop dep.
+  useEffect(() => { onTimeUpdateRef.current = onTimeUpdate; }, [onTimeUpdate]);
 
   // rAF loop for smooth playhead tracking — only runs while playing.
   // Starts on "play" event, stops on "pause"/"ended" to avoid burning
@@ -84,7 +126,7 @@ export default function RecordingPlayer({
           return;
         }
         setVideoTime(v.currentTime);
-        onTimeUpdate(v.currentTime);
+        onTimeUpdateRef.current(v.currentTime);
         rafRef.current = requestAnimationFrame(tick);
       };
       if (rafRef.current === null) {
@@ -112,7 +154,7 @@ export default function RecordingPlayer({
       video.removeEventListener("pause", stopLoop);
       video.removeEventListener("ended", stopLoop);
     };
-  }, [segment?.id, onTimeUpdate]);
+  }, [segment?.id]); // onTimeUpdate is accessed via ref — no restart on identity change
 
   // Track play/pause state
   useEffect(() => {
@@ -161,6 +203,14 @@ export default function RecordingPlayer({
     if (!video) return;
     video.currentTime = Math.max(0, Math.min(seconds, video.duration || 0));
   }, []);
+
+  // Expose seekTo and setInitialSeek to parent via ref (R6 timeline click-to-seek).
+  useImperativeHandle(ref, () => ({
+    seekTo,
+    setInitialSeek(seconds: number) {
+      pendingSeekRef.current = seconds;
+    },
+  }), [seekTo]);
 
   // Format time displays
   const wallClock = segment ? formatWallClock(segment.start_time, videoTime) : "--:--:--";
@@ -219,4 +269,7 @@ export default function RecordingPlayer({
       )}
     </div>
   );
-}
+  }, // end forwardRef inner function
+); // end forwardRef
+
+export default RecordingPlayer;

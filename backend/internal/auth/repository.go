@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
+
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/dbutil"
 )
 
 // User represents a row in the users table.
@@ -37,6 +41,17 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// CountUsers returns the total number of user accounts in the database.
+// Used by the setup handler to determine if first-run setup is required.
+func (r *Repository) CountUsers(ctx context.Context) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
 // CreateUser inserts a new user with a pre-hashed password.
 func (r *Repository) CreateUser(ctx context.Context, username, passwordHash, role string) (*User, error) {
 	var u User
@@ -50,8 +65,8 @@ func (r *Repository) CreateUser(ctx context.Context, username, passwordHash, rol
 	if err != nil {
 		return nil, fmt.Errorf("creating user %q: %w", username, err)
 	}
-	u.CreatedAt, _ = parseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = parseSQLiteTime(updatedStr)
+	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
+	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
 	return &u, nil
 }
 
@@ -65,14 +80,14 @@ func (r *Repository) GetUserByUsername(ctx context.Context, username string) (*U
 		 FROM users WHERE username = ? COLLATE NOCASE`,
 		username,
 	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &createdStr, &updatedStr)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("getting user %q: %w", username, err)
 	}
-	u.CreatedAt, _ = parseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = parseSQLiteTime(updatedStr)
+	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
+	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
 	return &u, nil
 }
 
@@ -84,14 +99,14 @@ func (r *Repository) GetUserByID(ctx context.Context, id int) (*User, error) {
 		`SELECT id, username, password_hash, role, created_at, updated_at
 		 FROM users WHERE id = ?`, id,
 	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &createdStr, &updatedStr)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("getting user %d: %w", id, err)
 	}
-	u.CreatedAt, _ = parseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = parseSQLiteTime(updatedStr)
+	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
+	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
 	return &u, nil
 }
 
@@ -116,18 +131,18 @@ func (r *Repository) GetRefreshToken(ctx context.Context, token string) (*Refres
 		`SELECT id, user_id, token, expires_at, created_at
 		 FROM refresh_tokens WHERE token = ?`, token,
 	).Scan(&rt.ID, &rt.UserID, &rt.Token, &expiresStr, &createdStr)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("getting refresh token: %w", err)
 	}
-	expiresAt, err := parseSQLiteTime(expiresStr)
+	expiresAt, err := dbutil.ParseSQLiteTime(expiresStr)
 	if err != nil {
 		return nil, fmt.Errorf("getting refresh token: parsing expires_at %q: %w", expiresStr, err)
 	}
 	rt.ExpiresAt = expiresAt
-	rt.CreatedAt, _ = parseSQLiteTime(createdStr) // created_at is informational; parse failure non-fatal
+	rt.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr) // created_at is informational; parse failure non-fatal
 	if time.Now().After(rt.ExpiresAt) {
 		return nil, ErrTokenExpired
 	}
@@ -138,6 +153,45 @@ func (r *Repository) GetRefreshToken(ctx context.Context, token string) (*Refres
 func (r *Repository) DeleteRefreshToken(ctx context.Context, token string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE token = ?`, token)
 	return err
+}
+
+// GetUserByOIDCSub returns the user linked to the given OIDC subject claim.
+// Returns ErrNotFound when no user has that oidc_sub.
+func (r *Repository) GetUserByOIDCSub(ctx context.Context, sub string) (*User, error) {
+	var u User
+	var createdStr, updatedStr string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, username, password_hash, role, created_at, updated_at
+		 FROM users WHERE oidc_sub = ?`, sub,
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &createdStr, &updatedStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting user by OIDC sub: %w", err)
+	}
+	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
+	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
+	return &u, nil
+}
+
+// CreateOIDCUser inserts a new OIDC-only user (no local password) linked to the given subject.
+// Callers must supply a non-empty display name; role should be "viewer" for self-provisioned users.
+func (r *Repository) CreateOIDCUser(ctx context.Context, sub, username, role string) (*User, error) {
+	var u User
+	var createdStr, updatedStr string
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO users (username, password_hash, role, oidc_sub)
+		 VALUES (?, '', ?, ?)
+		 RETURNING id, username, password_hash, role, created_at, updated_at`,
+		username, role, sub,
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &createdStr, &updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("creating OIDC user %q: %w", username, err)
+	}
+	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
+	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
+	return &u, nil
 }
 
 // DeleteExpiredRefreshTokens removes all tokens past their expiry time.
@@ -154,7 +208,7 @@ func (r *Repository) GetSetting(ctx context.Context, key string) (string, error)
 	err := r.db.QueryRowContext(ctx,
 		`SELECT value FROM system_settings WHERE key = ?`, key,
 	).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {
@@ -191,11 +245,17 @@ func (r *Repository) GetOrGenerateKey(ctx context.Context, settingKey string) ([
 	if genErr != nil {
 		return nil, genErr
 	}
-	_, _ = r.db.ExecContext(ctx,
+	// INSERT OR IGNORE: if the key already exists (race with concurrent startup),
+	// the INSERT is a no-op. Log any *real* DB errors (disk full, read-only) so
+	// the subsequent GetSetting failure has clear context.
+	if _, insErr := r.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO system_settings (key, value, updated_at)
 		 VALUES (?, ?, CURRENT_TIMESTAMP)`,
 		settingKey, base64.StdEncoding.EncodeToString(candidate),
-	)
+	); insErr != nil {
+		slog.Default().Warn("GetOrGenerateKey: INSERT failed, will attempt read",
+			"key", settingKey, "error", insErr)
+	}
 
 	// Always read back the authoritative stored value (ours or the race winner's).
 	stored, err := r.GetSetting(ctx, settingKey)
@@ -206,22 +266,11 @@ func (r *Repository) GetOrGenerateKey(ctx context.Context, settingKey string) ([
 	if decErr != nil {
 		return nil, fmt.Errorf("decoding key %q: %w", settingKey, decErr)
 	}
+	// AES-256 and HS256 both require exactly 32 bytes. A wrong-length key means
+	// the database row was corrupted or written by incompatible software.
+	if len(key) != 32 {
+		return nil, fmt.Errorf("stored key %q has unexpected length %d (expected 32 bytes); database may be corrupt", settingKey, len(key))
+	}
 	return key, nil
 }
 
-// parseSQLiteTime parses the time formats the modernc/sqlite driver may produce.
-// Duplicated across packages (recording, detection, auth) since each uses private helpers.
-func parseSQLiteTime(s string) (time.Time, error) {
-	for _, layout := range []string{
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05Z",
-		"2006-01-02T15:04:05",
-		time.RFC3339,
-		time.RFC3339Nano,
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("cannot parse timestamp %q", s)
-}

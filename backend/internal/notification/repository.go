@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/dbutil"
 )
 
 // Repository provides access to notification_tokens, notification_prefs, and
@@ -52,8 +54,8 @@ func (r *Repository) tokenByValue(ctx context.Context, userID int, provider, tok
 	if err != nil {
 		return nil, err
 	}
-	rec.CreatedAt, _ = parseSQLiteTime(createdAt)
-	rec.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+	rec.CreatedAt, _ = dbutil.ParseSQLiteTime(createdAt)
+	rec.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedAt)
 	return rec, nil
 }
 
@@ -76,8 +78,8 @@ func (r *Repository) ListTokensByUser(ctx context.Context, userID int) ([]TokenR
 		if err := rows.Scan(&rec.ID, &rec.UserID, &rec.Token, &rec.Provider, &rec.Label, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		rec.CreatedAt, _ = parseSQLiteTime(createdAt)
-		rec.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+		rec.CreatedAt, _ = dbutil.ParseSQLiteTime(createdAt)
+		rec.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedAt)
 		tokens = append(tokens, rec)
 	}
 	if tokens == nil {
@@ -123,8 +125,8 @@ func (r *Repository) TokensByUserAndProvider(ctx context.Context, userID int, pr
 		if err := rows.Scan(&rec.ID, &rec.UserID, &rec.Token, &rec.Provider, &rec.Label, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		rec.CreatedAt, _ = parseSQLiteTime(createdAt)
-		rec.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+		rec.CreatedAt, _ = dbutil.ParseSQLiteTime(createdAt)
+		rec.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedAt)
 		tokens = append(tokens, rec)
 	}
 	return tokens, rows.Err()
@@ -246,7 +248,8 @@ func (r *Repository) MatchingPrefs(ctx context.Context, eventType string, camera
 			 FROM notification_prefs
 			 WHERE enabled=1
 			   AND (event_type=? OR event_type='*')
-			   AND (camera_id IS NULL OR camera_id=?)`,
+			   AND (camera_id IS NULL OR camera_id=?)
+			 ORDER BY critical DESC`,
 			eventType, cameraID,
 		)
 	} else {
@@ -255,7 +258,8 @@ func (r *Repository) MatchingPrefs(ctx context.Context, eventType string, camera
 			 FROM notification_prefs
 			 WHERE enabled=1
 			   AND (event_type=? OR event_type='*')
-			   AND camera_id IS NULL`,
+			   AND camera_id IS NULL
+			 ORDER BY critical DESC`,
 			eventType,
 		)
 	}
@@ -406,9 +410,9 @@ func (r *Repository) ListLogsByUser(ctx context.Context, userID, limit int) ([]L
 		}
 		rec.DeepLink = deepLink.String
 		rec.LastError = lastErr.String
-		rec.ScheduledAt, _ = parseSQLiteTime(scheduledAt)
+		rec.ScheduledAt, _ = dbutil.ParseSQLiteTime(scheduledAt)
 		if sentAt.Valid {
-			t, _ := parseSQLiteTime(sentAt.String)
+			t, _ := dbutil.ParseSQLiteTime(sentAt.String)
 			rec.SentAt = &t
 		}
 		logs = append(logs, rec)
@@ -420,21 +424,6 @@ func (r *Repository) ListLogsByUser(ctx context.Context, userID, limit int) ([]L
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-// parseSQLiteTime parses timestamps as stored by modernc/sqlite.
-// modernc/sqlite serializes time.Time as RFC3339Nano; falls back to
-// the space-delimited format produced by SQLite's CURRENT_TIMESTAMP,
-// which is always UTC. Do NOT convert to time.Local — store as UTC.
-func parseSQLiteTime(s string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return t, nil
-	}
-	// CURRENT_TIMESTAMP format: "2006-01-02 15:04:05" — always UTC per SQLite spec.
-	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.UTC); err == nil {
-		return t, nil
-	}
-	return time.Time{}, fmt.Errorf("unrecognized time format: %q", s)
-}
 
 func boolToInt(b bool) int {
 	if b {

@@ -5,6 +5,7 @@ package camera
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/pathutil"
 )
 
 // validCameraName allows alphanumeric characters, spaces, dashes, and underscores.
@@ -107,6 +109,18 @@ type CameraWithStatus struct {
 	PipelineStatus PipelineStatus `json:"pipeline_status"`
 }
 
+// normalizedJSON re-encodes a json.RawMessage through unmarshal→marshal so that
+// semantically identical JSON (differing only in whitespace or key order) compares
+// equal via string comparison. Falls back to raw bytes on invalid JSON.
+func normalizedJSON(raw json.RawMessage) string {
+	var v interface{}
+	if json.Unmarshal(raw, &v) != nil {
+		return string(raw)
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
 // Manager supervises all camera pipelines, loading cameras from the database
 // and syncing their streams to go2rtc. Stop() waits for all pipeline
 // goroutines to finish before returning.
@@ -119,8 +133,10 @@ type Manager struct {
 	recRepo    *recording.Repository
 	detector   detection.Detector      // nil if detection is disabled globally (Phase 5)
 	detCfg     config.DetectionConfig  // detection settings passed to each pipeline
+	pipeDeps   *PipelineDeps           // Phase 13: face recognizer, audio classifier (may be nil)
 	logger     *slog.Logger
 	cameras    map[string]*Pipeline
+	stopped    bool           // set by Stop(); prevents Start() from adding new pipelines after shutdown
 	wg         sync.WaitGroup
 	mu         sync.RWMutex
 }
@@ -128,6 +144,7 @@ type Manager struct {
 // NewManager creates a camera manager backed by the database and go2rtc.
 // detector may be nil when detection is disabled — each Pipeline checks for nil
 // before creating a DetectionPipeline.
+// deps may be nil when no Phase 13 features are enabled.
 func NewManager(
 	repo *Repository,
 	g2r *go2rtc.Client,
@@ -138,6 +155,7 @@ func NewManager(
 	detector detection.Detector,
 	detCfg config.DetectionConfig,
 	logger *slog.Logger,
+	deps *PipelineDeps,
 ) *Manager {
 	return &Manager{
 		repo:       repo,
@@ -148,6 +166,7 @@ func NewManager(
 		recRepo:    recRepo,
 		detector:   detector,
 		detCfg:     detCfg,
+		pipeDeps:   deps,
 		logger:     logger.With("component", "camera_manager"),
 		cameras:    make(map[string]*Pipeline),
 	}
@@ -181,8 +200,12 @@ func (m *Manager) Start(ctx context.Context) error {
 			// Don't fail startup — pipeline will detect missing stream
 		}
 
-		pipeline := NewPipeline(&cam, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger)
+		pipeline := NewPipeline(&cam, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger, m.pipeDeps)
 		m.mu.Lock()
+		if m.stopped {
+			m.mu.Unlock()
+			break // Stop() was called during startup — don't launch more pipelines
+		}
 		m.cameras[cam.Name] = pipeline
 		m.wg.Add(1)
 		m.mu.Unlock()
@@ -207,6 +230,7 @@ func (m *Manager) Start(ctx context.Context) error {
 // goroutines to finish.
 func (m *Manager) Stop() {
 	m.mu.Lock()
+	m.stopped = true // prevent Start() from adding new pipelines after this point
 	for name, pipeline := range m.cameras {
 		m.logger.Info("stopping camera pipeline", "name", name)
 		pipeline.Stop()
@@ -239,8 +263,12 @@ func (m *Manager) AddCamera(ctx context.Context, cam *CameraRecord) (*CameraWith
 			)
 		}
 
-		pipeline := NewPipeline(created, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger)
+		pipeline := NewPipeline(created, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger, m.pipeDeps)
 		m.mu.Lock()
+		if m.stopped {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("camera manager is shutting down")
+		}
 		m.cameras[created.Name] = pipeline
 		m.wg.Add(1) // must be inside lock so Stop() can't race between map insert and wg tracking
 		m.mu.Unlock()
@@ -284,6 +312,12 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 		return nil, err
 	}
 
+	// Zone preservation: if the caller didn't supply zones (nil), keep the existing ones.
+	// This prevents a PUT /cameras/:name without a zones field from silently wiping zones.
+	if cam.Zones == nil {
+		cam.Zones = old.Zones
+	}
+
 	updated, err := m.repo.Update(ctx, name, cam)
 	if err != nil {
 		return nil, err
@@ -293,7 +327,8 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 	enabledChanged := old.Enabled != updated.Enabled
 	recordChanged := old.Record != updated.Record
 	detectChanged := old.Detect != updated.Detect
-	needsRestart := streamChanged || enabledChanged || recordChanged || detectChanged
+	zonesChanged := normalizedJSON(old.Zones) != normalizedJSON(updated.Zones) // Phase 9: zone config change requires pipeline restart
+	needsRestart := streamChanged || enabledChanged || recordChanged || detectChanged || zonesChanged
 
 	if needsRestart {
 		// Stop old pipeline if running
@@ -341,8 +376,12 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 				)
 			}
 
-			pipeline := NewPipeline(updated, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger)
+			pipeline := NewPipeline(updated, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger, m.pipeDeps)
 			m.mu.Lock()
+			if m.stopped {
+				m.mu.Unlock()
+				return nil, fmt.Errorf("camera manager is shutting down")
+			}
 			m.cameras[name] = pipeline
 			m.wg.Add(1) // must be inside lock so Stop() can't race between map insert and wg tracking
 			m.mu.Unlock()
@@ -420,11 +459,18 @@ func (m *Manager) RemoveCamera(ctx context.Context, name string) error {
 	// and the DB record survives, allowing a retry. If we deleted the DB row first and
 	// then crashed, the files would be orphaned permanently with no reference.
 	sanitized := SanitizeName(name)
-	recDir := filepath.Join(m.storageCfg.HotPath, sanitized)
+	// Resolve HotPath symlinks so the containment check and removal work on
+	// the real path — symlinked storage (bind mounts, NAS) would otherwise
+	// produce a recDir that doesn't match resolvedHotPath prefix.
+	resolvedHotPath := m.storageCfg.HotPath
+	if resolved, err := filepath.EvalSymlinks(m.storageCfg.HotPath); err == nil {
+		resolvedHotPath = resolved
+	}
+	recDir := filepath.Join(resolvedHotPath, sanitized)
 	// Containment check: verify the resolved path is strictly under the hot storage root
 	// before calling os.RemoveAll, which is irreversible and could delete unrelated files
 	// if the constructed path somehow escapes the storage boundary.
-	if isUnderPath(filepath.Clean(recDir), m.storageCfg.HotPath) {
+	if pathutil.IsUnderPath(filepath.Clean(recDir), resolvedHotPath) {
 		if err := os.RemoveAll(recDir); err != nil {
 			m.logger.Warn("failed to remove recording directory", "path", recDir, "error", err)
 			// Non-fatal: proceed with DB deletion so the camera can be removed from the UI.
@@ -517,17 +563,6 @@ func (m *Manager) syncToGo2RTC(ctx context.Context, cam *CameraRecord) error {
 		}
 	}
 	return nil
-}
-
-// isUnderPath checks if cleanPath is strictly contained within basePath.
-// Returns false if cleanPath equals basePath (the storage root itself is not a valid target).
-func isUnderPath(cleanPath, basePath string) bool {
-	base := filepath.Clean(basePath)
-	rel, err := filepath.Rel(base, cleanPath)
-	if err != nil {
-		return false
-	}
-	return rel != "." && !strings.HasPrefix(rel, "..")
 }
 
 // removeFromGo2RTC removes a camera's streams from go2rtc.

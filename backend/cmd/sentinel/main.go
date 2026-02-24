@@ -1,9 +1,9 @@
 // Sentinel NVR — the main entry point.
 // Startup order: config → validate → logging → SQLite → event bus → auth (keys + admin) →
-//   camera repo (seed) → go2rtc → camera manager → HTTP server.
+//   camera repo (seed) → go2rtc → camera manager → storage manager → HTTP server.
 // Graceful shutdown on SIGINT/SIGTERM with 30s timeout.
 // Shutdown order: event bus (unblocks SSE handlers) → persister (drain) → HTTP server →
-//   cameras → watchdog → database.
+//   cameras → storage → watchdog → database.
 package main
 
 import (
@@ -31,6 +31,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/notification"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/server"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/storage"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/watchdog"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
 )
@@ -53,9 +54,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up structured logging
-	logLevel := parseLogLevel(cfg.Server.LogLevel)
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	// Set up structured logging with a dynamic level so PUT /config can change it at runtime.
+	var logLevelVar slog.LevelVar
+	logLevelVar.Set(parseLogLevel(cfg.Server.LogLevel))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: &logLevelVar}))
 	slog.SetDefault(logger)
 
 	logger.Info("starting Sentinel NVR",
@@ -75,6 +77,10 @@ func main() {
 	bus := eventbus.New(128, logger)
 	logger.Info("event bus initialized")
 
+	// cleanupWg tracks the daily refresh token cleanup goroutine so we can wait for it
+	// to finish before closing the database during graceful shutdown.
+	var cleanupWg sync.WaitGroup
+
 	// Initialize auth service — loads or generates JWT secret + credential key on first run (Phase 7, CG6).
 	// Runs before camera repo so camera credential encryption is available during seed.
 	authRepo := auth.NewRepository(database)
@@ -93,6 +99,28 @@ func main() {
 			logger.Warn("failed to clean expired refresh tokens", "error", cleanErr)
 		}
 		cleanCancel()
+		// Daily background cleanup: keep the refresh_tokens table small over long uptimes (H-5).
+		// stopCleanup + cleanupWg ensure the goroutine exits before the DB is closed.
+		stopCleanup := make(chan struct{})
+		cleanupWg.Add(1)
+		go func() {
+			defer cleanupWg.Done()
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopCleanup:
+					return
+				case <-ticker.C:
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if err := authRepo.DeleteExpiredRefreshTokens(ctx); err != nil {
+						logger.Warn("daily refresh token cleanup failed", "error", err)
+					}
+					cancel()
+				}
+			}
+		}()
+		defer func() { close(stopCleanup); cleanupWg.Wait() }()
 		// Ensure at least one admin user exists (first-run setup).
 		if ensureErr := ensureAdminUser(authRepo, logger); ensureErr != nil {
 			logger.Error("failed to ensure admin user", "error", ensureErr)
@@ -101,6 +129,19 @@ func main() {
 		logger.Info("auth service initialized")
 	} else {
 		logger.Warn("authentication is disabled (auth.enabled=false) — all API endpoints are publicly accessible")
+	}
+
+	// Initialize OIDC provider when SSO is configured (Phase 7, CG6).
+	var oidcProvider *auth.OIDCProvider
+	if cfg.Auth.Enabled && cfg.Auth.OIDC.Enabled {
+		oidcCtx, oidcCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		oidcProvider, err = auth.NewOIDCProvider(oidcCtx, cfg.Auth.OIDC)
+		oidcCancel()
+		if err != nil {
+			logger.Error("OIDC provider initialization failed", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("OIDC provider initialized", "provider", cfg.Auth.OIDC.ProviderURL)
 	}
 
 	// Initialize and start watchdog (R4)
@@ -207,9 +248,51 @@ func main() {
 		logger.Info("notifications disabled (notifications.enabled=false)")
 	}
 
+	// Initialize face repository (Phase 13, R11) — always created (serves face CRUD API
+	// regardless of face_recognition.enabled). Embedding storage uses the same SQLite DB.
+	faceRepo := detection.NewFaceRepository(database)
+
+	// Build optional pipeline dependencies (Phase 13, R11/R12).
+	var pipeDeps *camera.PipelineDeps
+	{
+		var faceRecognizer detection.FaceRecognizer
+		if cfg.Detection.FaceRecognition.Enabled && cfg.Detection.Enabled {
+			faceRecognizer = detection.NewRemoteFaceRecognizer(
+				fmt.Sprintf("http://127.0.0.1:%d", cfg.Detection.InferencePort),
+				logger,
+			)
+			logger.Info("face recognition enabled",
+				"threshold", cfg.Detection.FaceRecognition.MatchThreshold,
+				"max_faces", cfg.Detection.FaceRecognition.MaxFacesPerFrame,
+			)
+		}
+
+		// Audio classifier: calls sentinel-infer /v1/audio/classify endpoint (Phase 13, R12).
+		// Uses the same inference server as object detection and face recognition.
+		var audioClassifier detection.AudioClassifier
+		if cfg.Detection.AudioClassification.Enabled && cfg.Detection.Enabled {
+			audioClassifier = detection.NewRemoteAudioClassifier(
+				fmt.Sprintf("http://127.0.0.1:%d", cfg.Detection.InferencePort),
+				logger,
+			)
+			logger.Info("audio classification enabled",
+				"threshold", cfg.Detection.AudioClassification.ConfidenceThreshold,
+				"sample_interval", cfg.Detection.AudioClassification.SampleInterval,
+			)
+		}
+
+		if faceRecognizer != nil || audioClassifier != nil {
+			pipeDeps = &camera.PipelineDeps{
+				FaceRecognizer:  faceRecognizer,
+				FaceRepo:        faceRepo,
+				AudioClassifier: audioClassifier,
+			}
+		}
+	}
+
 	// Initialize and start camera manager (DB-backed + go2rtc sync + recording + detection).
 	// Bounded context prevents startup from hanging indefinitely if go2rtc is slow.
-	camManager := camera.NewManager(camRepo, g2rClient, bus, cfg.Storage, cfg.Go2RTC.RTSPURL, recRepo, detector, cfg.Detection, logger)
+	camManager := camera.NewManager(camRepo, g2rClient, bus, cfg.Storage, cfg.Go2RTC.RTSPURL, recRepo, detector, cfg.Detection, logger, pipeDeps)
 	startCtx, startCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	if err := camManager.Start(startCtx); err != nil {
 		startCancel()
@@ -218,9 +301,16 @@ func main() {
 	}
 	startCancel()
 
+	// Initialize and start storage manager (hot→cold migration + cold retention cleanup, R13/R14).
+	storageManager := storage.NewManager(&cfg.Storage, recRepo, logger)
+	if err := storageManager.Start(); err != nil {
+		logger.Error("storage manager failed to start", "error", err)
+		os.Exit(1)
+	}
+
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, version, database, authService, camManager, camRepo, recRepo, detRepo, g2rClient, bus, notifRepo, logger)
+	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, g2rClient, bus, notifRepo, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err
@@ -259,7 +349,8 @@ func main() {
 		logger.Error("http server shutdown error", "error", err)
 	}
 
-	camManager.Stop() // bus.Publish is a safe no-op after bus.Close()
+	camManager.Stop()      // bus.Publish is a safe no-op after bus.Close()
+	storageManager.Stop() // cancel worker contexts and wait for in-flight batch to finish
 	wd.Stop()
 
 	database.Close()
@@ -374,10 +465,18 @@ func persistEvents(database *sql.DB, recRepo *recording.Repository, bus *eventbu
 			if event.Thumbnail != "" {
 				thumbIndicator = "yes" // absolute path never leaves the server
 			}
+			// Carry original event fields so the notification service can build rich
+			// notifications from events.persisted (including the DB-assigned EventID
+			// for deep links). CameraName/Label/Confidence are not in the Data map
+			// (SSE-facing payload) but are needed by notification.buildNotification.
 			bus.Publish(eventbus.Event{
-				Type:      "events.persisted",
-				CameraID:  event.CameraID,
-				Timestamp: event.Timestamp,
+				Type:       "events.persisted",
+				EventID:    id, // DB-assigned events.id — used by notification service
+				CameraID:   event.CameraID,
+				CameraName: event.CameraName,
+				Label:      event.Label,
+				Confidence: event.Confidence,
+				Timestamp:  event.Timestamp,
 				Data: map[string]any{
 					"id":         id,
 					"camera_id":  cameraID, // nil (JSON null) when camera_id is unknown
