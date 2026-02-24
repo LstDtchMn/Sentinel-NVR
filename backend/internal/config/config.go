@@ -110,6 +110,12 @@ type StorageConfig struct {
 	ColdRetentionDays int    `yaml:"cold_retention_days"`
 	SegmentDuration   int    `yaml:"segment_duration"`
 	SegmentFormat     string `yaml:"segment_format"`
+	// MigrationIntervalHours controls how often the hot→cold migrator runs.
+	// Default: 1 (once per hour). Increase on low-I/O systems.
+	MigrationIntervalHours int `yaml:"migration_interval_hours"`
+	// CleanupIntervalHours controls how often the cold-retention cleaner runs.
+	// Default: 6. Decrease for tighter space management; increase to reduce I/O.
+	CleanupIntervalHours int `yaml:"cleanup_interval_hours"`
 }
 
 // DatabaseConfig holds SQLite database settings (CG2).
@@ -238,6 +244,12 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Storage.ColdPath != "" && cfg.Storage.ColdRetentionDays < 1 {
 		return fmt.Errorf("storage.cold_retention_days must be >= 1, got %d", cfg.Storage.ColdRetentionDays)
+	}
+	if cfg.Storage.MigrationIntervalHours < 1 {
+		return fmt.Errorf("storage.migration_interval_hours must be >= 1, got %d", cfg.Storage.MigrationIntervalHours)
+	}
+	if cfg.Storage.CleanupIntervalHours < 1 {
+		return fmt.Errorf("storage.cleanup_interval_hours must be >= 1, got %d", cfg.Storage.CleanupIntervalHours)
 	}
 
 	if cfg.Storage.SegmentFormat != "" && cfg.Storage.SegmentFormat != "mp4" {
@@ -439,6 +451,12 @@ func setDefaults(cfg *Config) {
 		// Regular MP4 (not fragmented) — each segment is independently playable
 		// in VLC, browsers, etc. without needing an init segment (CG4).
 		cfg.Storage.SegmentFormat = "mp4"
+	}
+	if cfg.Storage.MigrationIntervalHours == 0 {
+		cfg.Storage.MigrationIntervalHours = 1
+	}
+	if cfg.Storage.CleanupIntervalHours == 0 {
+		cfg.Storage.CleanupIntervalHours = 6
 	}
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = "/data/sentinel.db"

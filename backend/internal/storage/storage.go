@@ -21,10 +21,8 @@ import (
 )
 
 const (
-	batchSize      = 100
-	migratorPeriod = 1 * time.Hour
-	cleanerPeriod  = 6 * time.Hour
-	dbTimeout      = 15 * time.Second
+	batchSize = 100
+	dbTimeout = 15 * time.Second
 )
 
 // Manager orchestrates hot/cold storage directories and retention cleanup (R13, R14).
@@ -92,6 +90,8 @@ func (m *Manager) Start() error {
 		"cold_path", m.cfg.ColdPath,
 		"hot_retention_days", m.cfg.HotRetentionDays,
 		"cold_retention_days", m.cfg.ColdRetentionDays,
+		"migration_interval_hours", m.cfg.MigrationIntervalHours,
+		"cleanup_interval_hours", m.cfg.CleanupIntervalHours,
 	)
 	return nil
 }
@@ -108,13 +108,13 @@ func (m *Manager) Stop() {
 // ─── Migrator ───────────────────────────────────────────────────────────────
 
 // runMigrator is the background goroutine that moves recordings from hot → cold storage.
-// It runs once immediately on start, then on a 1-hour ticker.
+// It runs once immediately on start, then on the configured migration_interval_hours ticker.
 func (m *Manager) runMigrator(ctx context.Context) {
 	defer m.wg.Done()
 
 	m.runMigratorOnce(ctx)
 
-	ticker := time.NewTicker(migratorPeriod)
+	ticker := time.NewTicker(time.Duration(m.cfg.MigrationIntervalHours) * time.Hour)
 	defer ticker.Stop()
 	for {
 		select {
@@ -234,13 +234,14 @@ func (m *Manager) runMigratorOnce(ctx context.Context) {
 // ─── Cleaner ────────────────────────────────────────────────────────────────
 
 // runCleaner is the background goroutine that deletes recordings older than
-// cold_retention_days. It runs once immediately on start, then on a 6-hour ticker.
+// cold_retention_days. It runs once immediately on start, then on the configured
+// cleanup_interval_hours ticker.
 func (m *Manager) runCleaner(ctx context.Context) {
 	defer m.wg.Done()
 
 	m.runCleanerOnce(ctx)
 
-	ticker := time.NewTicker(cleanerPeriod)
+	ticker := time.NewTicker(time.Duration(m.cfg.CleanupIntervalHours) * time.Hour)
 	defer ticker.Stop()
 	for {
 		select {
