@@ -270,9 +270,10 @@ func main() {
 	faceRepo := detection.NewFaceRepository(database)
 
 	// Build optional pipeline dependencies (Phase 13, R11/R12).
+	// faceRecognizer is also passed to server.New for the JPEG enrollment endpoint (R11).
 	var pipeDeps *camera.PipelineDeps
+	var faceRecognizer detection.FaceRecognizer
 	{
-		var faceRecognizer detection.FaceRecognizer
 		if cfg.Detection.FaceRecognition.Enabled && cfg.Detection.Enabled {
 			faceRecognizer = detection.NewRemoteFaceRecognizer(
 				fmt.Sprintf("http://127.0.0.1:%d", cfg.Detection.InferencePort),
@@ -333,7 +334,7 @@ func main() {
 
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, retentionRepo, g2rClient, bus, notifRepo, logger)
+	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, g2rClient, bus, notifRepo, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err

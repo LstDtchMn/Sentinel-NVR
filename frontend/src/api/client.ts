@@ -722,6 +722,43 @@ class ApiClient {
     await this.request(`/faces/${id}`, { method: "DELETE", signal });
   }
 
+  /**
+   * Enrolls a face from a JPEG photo (admin only, R11).
+   * The image is forwarded to sentinel-infer; the first detected face embedding is stored.
+   * Returns 422 when no face is detected and 503 when face recognition is disabled.
+   */
+  async enrollFaceFromPhoto(
+    name: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<FaceRecord> {
+    const formData = new FormData();
+    formData.append("name", name);
+    formData.append("image", file);
+    const timeoutCtrl = new AbortController();
+    const timeoutId = setTimeout(() => timeoutCtrl.abort(), 45_000); // 45s: infer can be slow
+    const sig = signal
+      ? combineSignals(signal, timeoutCtrl.signal)
+      : timeoutCtrl.signal;
+    try {
+      const resp = await fetch(`${API_BASE}/faces/enroll`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+        signal: sig,
+      });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        throw new Error(`API error ${resp.status}: ${detail}`);
+      }
+      return (await resp.json()) as FaceRecord;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   // --- Migration / Import (Phase 14, R15) ---
 
   /**
