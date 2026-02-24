@@ -1,6 +1,6 @@
 // Sentinel NVR — the main entry point.
 // Startup order: config → validate → logging → SQLite → event bus → auth (keys + admin) →
-//   camera repo (seed) → go2rtc → camera manager → storage manager → HTTP server.
+//   camera repo (seed) → go2rtc → camera manager → watchdog → storage manager → HTTP server.
 // Graceful shutdown on SIGINT/SIGTERM with 30s timeout.
 // Shutdown order: event bus (unblocks SSE handlers) → persister (drain) → HTTP server →
 //   cameras → storage → watchdog → database.
@@ -143,10 +143,6 @@ func main() {
 		}
 		logger.Info("OIDC provider initialized", "provider", cfg.Auth.OIDC.ProviderURL)
 	}
-
-	// Initialize and start watchdog (R4)
-	wd := watchdog.New(&cfg.Watchdog, logger)
-	go wd.Start()
 
 	// Initialize camera repository and seed from config (one-time YAML → DB migration)
 	camRepo := camera.NewRepository(database, authService)
@@ -300,6 +296,11 @@ func main() {
 		os.Exit(1)
 	}
 	startCancel()
+
+	// Initialize and start watchdog (R4) — must come after the camera manager so it can
+	// monitor pipeline health and restart failed cameras via camManager.RestartCamera.
+	wd := watchdog.New(&cfg.Watchdog, &cfg.Storage, camManager, bus, logger)
+	go wd.Start()
 
 	// Initialize and start storage manager (hot→cold migration + cold retention cleanup, R13/R14).
 	storageManager := storage.NewManager(&cfg.Storage, recRepo, logger)
