@@ -103,9 +103,7 @@ class SentinelApp extends StatelessWidget {
         primary: Color(0xFF58A6FF),   // accent blue (CG11 design language)
         secondary: Color(0xFF58A6FF),
         error: Color(0xFFF85149),     // critical alert red
-        background: Color(0xFF0D1117),
         surface: Color(0xFF161B22),
-        onBackground: Colors.white,
         onSurface: Colors.white,
       ),
       scaffoldBackgroundColor: const Color(0xFF0D1117),

@@ -50,7 +50,8 @@ class WebRtcService {
     final headers = <String, dynamic>{};
     if (cookieHeader != null) headers[HttpHeaders.cookieHeader] = cookieHeader;
 
-    _ws = await WebSocket.connect(wsUrl, headers: headers);
+    _ws = await WebSocket.connect(wsUrl, headers: headers)
+        .timeout(const Duration(seconds: 10));
 
     // ICE configuration — use dynamic servers from /relay/ice-servers when available,
     // fall back to public STUN for local-network use (Phase 12, CG11).

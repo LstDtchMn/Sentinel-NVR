@@ -50,7 +50,6 @@ class _TimelineScreenState extends State<TimelineScreen> {
   }
 
   @override
-  @override
   void dispose() {
     if (_videoCtrl != null && _videoListener != null) {
       _videoCtrl!.removeListener(_videoListener!);
