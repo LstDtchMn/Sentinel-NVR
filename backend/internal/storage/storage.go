@@ -2,6 +2,8 @@
 // Hot storage (SSD) holds recent recordings. Cold storage (HDD/NAS) holds archives.
 // A background migrator moves segments from hot → cold after hot_retention_days.
 // A background cleaner purges cold segments older than cold_retention_days.
+// A background event cleaner purges events per the per-camera × per-event-type
+// retention rules in the retention_rules table (R14).
 package storage
 
 import (
@@ -25,13 +27,24 @@ const (
 	dbTimeout = 15 * time.Second
 )
 
+// EventDeleter is the subset of detection.Repository used by the event retention
+// cleaner. Defined here (in the storage package) so storage does not import detection,
+// preventing a potential import cycle. detection.Repository satisfies this interface.
+type EventDeleter interface {
+	// DeleteOlderThan deletes up to limit events older than cutoff matching the
+	// given camera and type filters (nil/empty = wildcard). Returns rows deleted.
+	DeleteOlderThan(ctx context.Context, cameraID *int, eventType string, cutoff time.Time, limit int) (int, error)
+}
+
 // Manager orchestrates hot/cold storage directories and retention cleanup (R13, R14).
 type Manager struct {
-	cfg     *config.StorageConfig
-	recRepo *recording.Repository
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	logger  *slog.Logger
+	cfg           *config.StorageConfig
+	recRepo       *recording.Repository
+	retentionRepo *RetentionRepository // nil when retention_rules table is unavailable
+	eventDeleter  EventDeleter         // nil when detection is disabled
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	logger        *slog.Logger
 
 	// Resolved (symlink-expanded) versions of HotPath and ColdPath.
 	// NewRecorder also resolves hotPath via filepath.EvalSymlinks, so DB paths
@@ -42,11 +55,14 @@ type Manager struct {
 }
 
 // NewManager creates a storage manager for the given configuration.
-func NewManager(cfg *config.StorageConfig, recRepo *recording.Repository, logger *slog.Logger) *Manager {
+// retentionRepo and eventDeleter may be nil; if nil, event retention cleanup is skipped.
+func NewManager(cfg *config.StorageConfig, recRepo *recording.Repository, retentionRepo *RetentionRepository, eventDeleter EventDeleter, logger *slog.Logger) *Manager {
 	return &Manager{
-		cfg:     cfg,
-		recRepo: recRepo,
-		logger:  logger.With("component", "storage"),
+		cfg:           cfg,
+		recRepo:       recRepo,
+		retentionRepo: retentionRepo,
+		eventDeleter:  eventDeleter,
+		logger:        logger.With("component", "storage"),
 	}
 }
 
@@ -81,9 +97,16 @@ func (m *Manager) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	m.wg.Add(2)
+	workers := 2
+	if m.eventDeleter != nil && m.retentionRepo != nil {
+		workers = 3
+	}
+	m.wg.Add(workers)
 	go m.runMigrator(ctx)
 	go m.runCleaner(ctx)
+	if workers == 3 {
+		go m.runEventCleaner(ctx)
+	}
 
 	m.logger.Info("storage manager started",
 		"hot_path", m.cfg.HotPath,
@@ -92,6 +115,7 @@ func (m *Manager) Start() error {
 		"cold_retention_days", m.cfg.ColdRetentionDays,
 		"migration_interval_hours", m.cfg.MigrationIntervalHours,
 		"cleanup_interval_hours", m.cfg.CleanupIntervalHours,
+		"event_retention_enabled", workers == 3,
 	)
 	return nil
 }
@@ -377,4 +401,174 @@ func copyFile(src, dst string) (retErr error) {
 		return fmt.Errorf("syncing %q: %w", dst, err)
 	}
 	return nil
+}
+
+// ─── Event Retention Cleaner ─────────────────────────────────────────────────
+
+// runEventCleaner is the background goroutine that enforces per-camera ×
+// per-event-type retention rules. Runs on the same cadence as the recording
+// cleaner (cleanup_interval_hours).
+func (m *Manager) runEventCleaner(ctx context.Context) {
+	defer m.wg.Done()
+
+	m.runEventCleanerOnce(ctx)
+
+	ticker := time.NewTicker(time.Duration(m.cfg.CleanupIntervalHours) * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.runEventCleanerOnce(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// knownEventTypes lists the event types emitted by the backend that can appear
+// in the events table. Used to enumerate per-type passes during cleanup.
+var knownEventTypes = []string{
+	"detection",
+	"face_match",
+	"audio_detection",
+	"camera.online",
+	"camera.offline",
+	"camera.connected",
+	"camera.disconnected",
+	"camera.error",
+}
+
+// runEventCleanerOnce applies per-camera × per-event-type retention rules to
+// the events table. For each unique (camera, type) combination covered by a
+// rule, events older than events_days are deleted. The global fallback deletes
+// events older than cold_retention_days for any (camera, type) not covered by
+// a specific rule.
+func (m *Manager) runEventCleanerOnce(ctx context.Context) {
+	// Fetch all rules up-front to avoid repeated DB round-trips in the inner loop.
+	rulesCtx, rulesCancel := context.WithTimeout(ctx, dbTimeout)
+	rules, err := m.retentionRepo.List(rulesCtx)
+	rulesCancel()
+	if err != nil {
+		m.logger.Warn("event cleaner: failed to list retention rules", "error", err)
+		return
+	}
+
+	// Index rules by (cameraID ptr value, eventType) for O(1) lookup below.
+	type ruleKey struct {
+		camID     int  // -1 = wildcard
+		typeIsSet bool // distinguishes "" from "not set"
+		eventType string
+	}
+	ruleMap := make(map[ruleKey]int, len(rules))
+	for _, rule := range rules {
+		key := ruleKey{camID: -1, eventType: ""}
+		if rule.CameraID != nil {
+			key.camID = *rule.CameraID
+		}
+		if rule.EventType != nil {
+			key.typeIsSet = true
+			key.eventType = *rule.EventType
+		}
+		ruleMap[key] = rule.EventsDays
+	}
+
+	// Helper: look up effective days for a (camera, type) pair.
+	// Priority: (cam, type) > (cam, *) > (*, type) > (*, *)
+	// Returns -1 when no rule matches (caller uses global fallback).
+	effectiveDays := func(camID int, evType string) int {
+		if d, ok := ruleMap[ruleKey{camID: camID, typeIsSet: true, eventType: evType}]; ok {
+			return d
+		}
+		if d, ok := ruleMap[ruleKey{camID: camID, typeIsSet: false}]; ok {
+			return d
+		}
+		if d, ok := ruleMap[ruleKey{camID: -1, typeIsSet: true, eventType: evType}]; ok {
+			return d
+		}
+		if d, ok := ruleMap[ruleKey{camID: -1, typeIsSet: false}]; ok {
+			return d
+		}
+		return -1
+	}
+
+	// Build a set of (camID, type) pairs that are explicitly covered by rules so we
+	// know which combos the global fallback must still handle.
+	type coveredKey struct{ camID int; evType string }
+	covered := make(map[coveredKey]bool)
+
+	// Apply rule-specific passes: for each rule that specifies a camera, iterate
+	// over the event types it covers.
+	for _, rule := range rules {
+		if rule.CameraID == nil {
+			continue // wildcard-camera rules handled in the global fallback pass
+		}
+		camID := *rule.CameraID
+		cutoff := time.Now().AddDate(0, 0, -rule.EventsDays)
+		types := knownEventTypes
+		if rule.EventType != nil {
+			types = []string{*rule.EventType}
+		}
+		for _, evType := range types {
+			covered[coveredKey{camID, evType}] = true
+			deleted := 0
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				dCtx, dCancel := context.WithTimeout(ctx, dbTimeout)
+				n, err := m.eventDeleter.DeleteOlderThan(dCtx, &camID, evType, cutoff, batchSize)
+				dCancel()
+				if err != nil {
+					m.logger.Warn("event cleaner: delete failed",
+						"camera_id", camID, "type", evType, "error", err)
+					break
+				}
+				deleted += n
+				if n < batchSize {
+					break
+				}
+			}
+			if deleted > 0 {
+				m.logger.Info("event cleaner: deleted expired events",
+					"camera_id", camID, "type", evType,
+					"retention_days", rule.EventsDays, "deleted", deleted)
+			}
+		}
+	}
+
+	// Global fallback pass: apply effective retention to every known type for
+	// any (camera, type) pair not yet handled by a camera-specific rule above.
+	// Uses nil cameraID so the query matches all cameras at once.
+	globalDays := m.cfg.ColdRetentionDays // default: use cold retention as event TTL
+	for _, evType := range knownEventTypes {
+		days := effectiveDays(-1, evType)
+		if days < 0 {
+			days = globalDays
+		}
+		cutoff := time.Now().AddDate(0, 0, -days)
+		deleted := 0
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			dCtx, dCancel := context.WithTimeout(ctx, dbTimeout)
+			// Pass nil cameraID to match all cameras; events already deleted by
+			// camera-specific rules above won't appear again (already gone from DB).
+			n, err := m.eventDeleter.DeleteOlderThan(dCtx, nil, evType, cutoff, batchSize)
+			dCancel()
+			if err != nil {
+				m.logger.Warn("event cleaner: global delete failed",
+					"type", evType, "error", err)
+				break
+			}
+			deleted += n
+			if n < batchSize {
+				break
+			}
+		}
+		if deleted > 0 {
+			m.logger.Info("event cleaner: global fallback deleted expired events",
+				"type", evType, "retention_days", days, "deleted", deleted)
+		}
+	}
 }

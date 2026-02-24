@@ -305,6 +305,19 @@ export interface StorageStats {
 }
 
 /**
+ * Per-camera × per-event-type retention rule (R14).
+ * camera_id=null and event_type=null act as wildcards.
+ */
+export interface RetentionRule {
+  id: number;
+  camera_id: number | null;
+  event_type: string | null;
+  events_days: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
  * Combines two AbortSignals so aborting either one aborts the result.
  * Uses the native AbortSignal.any() when available (Chrome 116+, Firefox 124+,
  * Safari 17.4+), with a manual fallback for older browsers.
@@ -746,6 +759,46 @@ class ApiClient {
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  // --- Retention Rules (R14) ---
+
+  /** Lists all retention rules (GET /retention/rules). */
+  async listRetentionRules(signal?: AbortSignal): Promise<RetentionRule[]> {
+    return this.request<RetentionRule[]>("/retention/rules", { signal });
+  }
+
+  /**
+   * Creates a retention rule (POST /retention/rules).
+   * Omit camera_id for a global rule; omit event_type to cover all event types.
+   */
+  async createRetentionRule(
+    body: { camera_id?: number | null; event_type?: string | null; events_days: number },
+    signal?: AbortSignal,
+  ): Promise<RetentionRule> {
+    return this.request<RetentionRule>("/retention/rules", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  /** Updates events_days for an existing rule (PUT /retention/rules/:id). */
+  async updateRetentionRule(
+    id: number,
+    events_days: number,
+    signal?: AbortSignal,
+  ): Promise<RetentionRule> {
+    return this.request<RetentionRule>(`/retention/rules/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ events_days }),
+      signal,
+    });
+  }
+
+  /** Deletes a retention rule (DELETE /retention/rules/:id). */
+  async deleteRetentionRule(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/retention/rules/${id}`, { method: "DELETE", signal });
   }
 
   /** Executes the import — creates cameras from the uploaded file (admin only). */

@@ -20,6 +20,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/notification"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/storage"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
 )
 
@@ -42,6 +43,7 @@ type Server struct {
 	recRepo              *recording.Repository
 	detRepo              *detection.Repository     // Phase 5: events CRUD
 	faceRepo             *detection.FaceRepository // Phase 13: face CRUD (R11)
+	retentionRepo        *storage.RetentionRepository // R14: per-camera × per-event-type retention rules
 	g2r                  *go2rtc.Client
 	eventBus             *eventbus.Bus         // Phase 3: used for WebSocket/SSE real-time event streaming
 	notifRepo            *notification.Repository  // Phase 8: token/pref management API (R9)
@@ -57,7 +59,7 @@ type Server struct {
 // logLevel is the dynamic slog.LevelVar created in main; PUT /config updates it at runtime.
 // notifRepo may be nil when notifications.enabled=false.
 // configPath is the path to sentinel.yml on disk; passed to handleUpdateConfig for config persistence.
-func New(cfg *config.Config, configPath string, version string, db *sql.DB, authService *auth.Service, oidcProvider *auth.OIDCProvider, logLevel *slog.LevelVar, camManager *camera.Manager, camRepo *camera.Repository, recRepo *recording.Repository, detRepo *detection.Repository, faceRepo *detection.FaceRepository, g2r *go2rtc.Client, eventBus *eventbus.Bus, notifRepo *notification.Repository, logger *slog.Logger) *Server {
+func New(cfg *config.Config, configPath string, version string, db *sql.DB, authService *auth.Service, oidcProvider *auth.OIDCProvider, logLevel *slog.LevelVar, camManager *camera.Manager, camRepo *camera.Repository, recRepo *recording.Repository, detRepo *detection.Repository, faceRepo *detection.FaceRepository, retentionRepo *storage.RetentionRepository, g2r *go2rtc.Client, eventBus *eventbus.Bus, notifRepo *notification.Repository, logger *slog.Logger) *Server {
 	if cfg.Server.LogLevel != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -98,6 +100,7 @@ func New(cfg *config.Config, configPath string, version string, db *sql.DB, auth
 		recRepo:              recRepo,
 		detRepo:              detRepo,
 		faceRepo:             faceRepo,
+		retentionRepo:        retentionRepo,
 		g2r:                  g2r,
 		eventBus:             eventBus,
 		notifRepo:            notifRepo,

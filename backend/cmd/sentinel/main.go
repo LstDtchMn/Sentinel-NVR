@@ -324,7 +324,8 @@ func main() {
 	go wd.Start()
 
 	// Initialize and start storage manager (hot→cold migration + cold retention cleanup, R13/R14).
-	storageManager := storage.NewManager(&cfg.Storage, recRepo, logger)
+	retentionRepo := storage.NewRetentionRepository(database)
+	storageManager := storage.NewManager(&cfg.Storage, recRepo, retentionRepo, detRepo, logger)
 	if err := storageManager.Start(); err != nil {
 		logger.Error("storage manager failed to start", "error", err)
 		os.Exit(1)
@@ -332,7 +333,7 @@ func main() {
 
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, g2rClient, bus, notifRepo, logger)
+	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, retentionRepo, g2rClient, bus, notifRepo, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err
