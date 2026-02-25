@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { api, SystemConfig, StorageStats, PairingCode } from "../api/client";
+import { api, SystemConfig, StorageStats, PairingCode, RetentionRule, CameraDetail } from "../api/client";
 import { Settings as SettingsIcon } from "lucide-react";
 
 /** Format bytes as human-readable string (GiB / MiB / KiB). */
@@ -34,6 +34,15 @@ export default function Settings() {
   const [submitting, setSubmitting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Retention rules state (R14)
+  const [retentionRules, setRetentionRules] = useState<RetentionRule[]>([]);
+  const [cameras, setCameras] = useState<CameraDetail[]>([]);
+  const [newRuleCameraId, setNewRuleCameraId] = useState<string>("");   // "" = wildcard
+  const [newRuleEventType, setNewRuleEventType] = useState<string>("");  // "" = wildcard
+  const [newRuleDays, setNewRuleDays] = useState<number>(30);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
+  const [retentionSubmitting, setRetentionSubmitting] = useState(false);
 
   // QR pairing state (Phase 12, CG11)
   const [pairingCode, setPairingCode] = useState<string | null>(null);
@@ -75,6 +84,23 @@ export default function Settings() {
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         // Non-fatal: stats panel simply won't render.
+      });
+
+    // Retention rules (R14)
+    api
+      .listRetentionRules(controller.signal)
+      .then(setRetentionRules)
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        // Non-fatal: retention section still renders without existing rules.
+      });
+
+    // Camera list for the retention rule camera picker
+    api
+      .getCameras(controller.signal)
+      .then(setCameras)
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
       });
 
     return () => controller.abort();
@@ -131,6 +157,40 @@ export default function Settings() {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setPairingError(err instanceof Error ? err.message : "Failed to generate pairing code");
       setPairingLoading(false);
+    }
+  };
+
+  const handleAddRetentionRule = async () => {
+    if (retentionSubmitting) return;
+    if (newRuleDays < 1) {
+      setRetentionError("Days must be at least 1");
+      return;
+    }
+    setRetentionSubmitting(true);
+    setRetentionError(null);
+    try {
+      const rule = await api.createRetentionRule({
+        camera_id: newRuleCameraId ? parseInt(newRuleCameraId, 10) : null,
+        event_type: newRuleEventType || null,
+        events_days: newRuleDays,
+      });
+      setRetentionRules((prev) => [...prev, rule]);
+      setNewRuleCameraId("");
+      setNewRuleEventType("");
+      setNewRuleDays(30);
+    } catch (err) {
+      setRetentionError(err instanceof Error ? err.message : "Failed to create rule");
+    } finally {
+      setRetentionSubmitting(false);
+    }
+  };
+
+  const handleDeleteRetentionRule = async (id: number) => {
+    try {
+      await api.deleteRetentionRule(id);
+      setRetentionRules((prev) => prev.filter((r) => r.id !== id));
+    } catch (err) {
+      setRetentionError(err instanceof Error ? err.message : "Failed to delete rule");
     }
   };
 
@@ -331,6 +391,106 @@ export default function Settings() {
             </div>
           </section>
         )}
+
+        {/* Retention Rules (R14) — per-camera × per-event-type */}
+        <section className="bg-surface-raised border border-border rounded-lg p-5">
+          <h2 className="text-sm font-medium text-muted mb-1">Event Retention Rules</h2>
+          <p className="text-xs text-faint mb-4">
+            Override how long events are kept for a specific camera and/or event type.
+            Leave camera or type blank to create a wildcard rule. Rules are applied most-specific first:
+            (camera + type) &gt; (camera only) &gt; (type only) &gt; (global fallback = cold retention days).
+          </p>
+
+          {retentionError && (
+            <p className="text-red-400 text-sm mb-3">{retentionError}</p>
+          )}
+
+          {/* Existing rules table */}
+          {retentionRules.length > 0 && (
+            <div className="mb-4 space-y-2">
+              {retentionRules.map((rule) => {
+                const camName = rule.camera_id != null
+                  ? cameras.find((c) => c.id === rule.camera_id)?.name ?? `Camera ${rule.camera_id}`
+                  : "All cameras";
+                const typeName = rule.event_type ?? "All types";
+                return (
+                  <div
+                    key={rule.id}
+                    className="flex items-center justify-between text-sm bg-surface-base border border-border rounded-lg px-3 py-2"
+                  >
+                    <span className="text-white/80">
+                      <span className="font-mono">{camName}</span>
+                      <span className="text-faint mx-2">/</span>
+                      <span className="font-mono">{typeName}</span>
+                      <span className="text-faint ml-2">→</span>
+                      <span className="ml-2 text-sentinel-400 font-medium">{rule.events_days}d</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteRetentionRule(rule.id)}
+                      className="text-red-400 hover:text-red-300 text-xs ml-4"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Add new rule */}
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 items-end">
+            <div>
+              <label className="block text-xs text-muted mb-1">Camera</label>
+              <select
+                value={newRuleCameraId}
+                onChange={(e) => setNewRuleCameraId(e.target.value)}
+                className="w-full bg-surface-base border border-border rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-sentinel-500"
+              >
+                <option value="">All cameras</option>
+                {cameras.map((cam) => (
+                  <option key={cam.id} value={String(cam.id)}>{cam.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">Event type</label>
+              <select
+                value={newRuleEventType}
+                onChange={(e) => setNewRuleEventType(e.target.value)}
+                className="w-full bg-surface-base border border-border rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-sentinel-500"
+              >
+                <option value="">All types</option>
+                <option value="detection">detection</option>
+                <option value="face_match">face_match</option>
+                <option value="audio_detection">audio_detection</option>
+                <option value="camera.online">camera.online</option>
+                <option value="camera.offline">camera.offline</option>
+                <option value="camera.connected">camera.connected</option>
+                <option value="camera.disconnected">camera.disconnected</option>
+                <option value="camera.error">camera.error</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">Keep (days)</label>
+              <input
+                type="number"
+                min={1}
+                value={newRuleDays}
+                onChange={(e) => setNewRuleDays(parseInt(e.target.value, 10) || 1)}
+                className="w-full bg-surface-base border border-border rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-sentinel-500"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleAddRetentionRule}
+              disabled={retentionSubmitting}
+              className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+            >
+              {retentionSubmitting ? "Adding…" : "Add Rule"}
+            </button>
+          </div>
+        </section>
 
         {/* Detection section (read-only) */}
         {config && (

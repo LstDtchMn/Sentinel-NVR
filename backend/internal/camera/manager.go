@@ -495,6 +495,66 @@ func (m *Manager) RemoveCamera(ctx context.Context, name string) error {
 	return nil
 }
 
+// RestartCamera stops and restarts a camera's pipeline without modifying the DB
+// or re-syncing go2rtc. Used by the watchdog (R4) to recover pipelines that are
+// stuck in StateError when their internal retry loop hasn't resolved the fault.
+func (m *Manager) RestartCamera(ctx context.Context, name string) error {
+	// Stop the existing pipeline and remove it from the map.
+	m.mu.Lock()
+	oldPipeline, exists := m.cameras[name]
+	if exists {
+		oldPipeline.Stop()
+		delete(m.cameras, name)
+	}
+	m.mu.Unlock()
+
+	// Wait for the goroutine to fully exit before starting a new one.
+	// A background timeout guards against a goroutine that won't exit, but we
+	// prefer the caller's ctx so the watchdog can cancel if it's shutting down.
+	if exists {
+		select {
+		case <-oldPipeline.startDone:
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled waiting for pipeline exit: %w", ctx.Err())
+		}
+	}
+
+	// Re-read the camera from the DB so we pick up any config changes made
+	// while the pipeline was in error.
+	cam, err := m.repo.GetByName(ctx, name)
+	if err != nil {
+		return fmt.Errorf("getting camera for restart: %w", err)
+	}
+	if !cam.Enabled {
+		return nil // camera was disabled while we were waiting — don't restart
+	}
+
+	newPipeline := NewPipeline(cam, m.g2r, m.rtspBase, m.storageCfg.HotPath,
+		m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger, m.pipeDeps)
+
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return fmt.Errorf("camera manager is shutting down")
+	}
+	m.cameras[name] = newPipeline
+	m.wg.Add(1)
+	m.mu.Unlock()
+
+	go func() {
+		defer m.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				newPipeline.logger.Error("pipeline goroutine panic (recovered)", "panic", r)
+			}
+		}()
+		newPipeline.Start()
+	}()
+
+	m.logger.Info("camera pipeline restarted", "name", name, "reason", "watchdog")
+	return nil
+}
+
 // ListCameras returns all cameras from the DB with live pipeline status.
 func (m *Manager) ListCameras(ctx context.Context) ([]CameraWithStatus, error) {
 	cameras, err := m.repo.List(ctx)

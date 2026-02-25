@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -133,6 +134,75 @@ func (r *Repository) Delete(ctx context.Context, id int) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// DeleteOlderThan bulk-deletes events older than cutoff that match the given
+// camera and event-type filters. Pass cameraID=nil to match all cameras;
+// pass eventType="" to match all event types. Returns the number of rows deleted.
+// Thumbnails for deleted events are also removed from disk.
+// Processes at most limit rows per call — iterate until 0 is returned to drain.
+func (r *Repository) DeleteOlderThan(ctx context.Context, cameraID *int, eventType string, cutoff time.Time, limit int) (int, error) {
+	// Fetch IDs and thumbnail paths in one query, then delete — two-phase approach
+	// avoids holding a write lock for the file I/O.
+	where := " WHERE start_time < ?"
+	args := []any{cutoff}
+	if cameraID != nil {
+		where += " AND camera_id = ?"
+		args = append(args, *cameraID)
+	}
+	if eventType != "" {
+		where += " AND type = ?"
+		args = append(args, eventType)
+	}
+	args = append(args, limit)
+
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT id, thumbnail FROM events"+where+" ORDER BY id LIMIT ?", args...)
+	if err != nil {
+		return 0, fmt.Errorf("querying events for retention cleanup: %w", err)
+	}
+	type row struct {
+		id        int
+		thumbnail string
+	}
+	var batch []row
+	for rows.Next() {
+		var ro row
+		if err := rows.Scan(&ro.id, &ro.thumbnail); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scanning events for retention cleanup: %w", err)
+		}
+		batch = append(batch, ro)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(batch) == 0 {
+		return 0, nil
+	}
+
+	// Build an IN(...) clause for the exact IDs we fetched.
+	ids := make([]any, len(batch))
+	placeholders := make([]string, len(batch))
+	for i, ro := range batch {
+		ids[i] = ro.id
+		placeholders[i] = "?"
+	}
+	result, err := r.db.ExecContext(ctx,
+		"DELETE FROM events WHERE id IN ("+strings.Join(placeholders, ",")+")", ids...)
+	if err != nil {
+		return 0, fmt.Errorf("deleting expired events: %w", err)
+	}
+	n, _ := result.RowsAffected()
+
+	// Best-effort thumbnail cleanup — log nothing here; callers that care can check.
+	for _, ro := range batch {
+		if ro.thumbnail != "" {
+			_ = os.Remove(ro.thumbnail)
+		}
+	}
+	return int(n), nil
 }
 
 // buildWhere constructs the WHERE clause and positional args from a ListFilter.

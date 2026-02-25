@@ -30,7 +30,9 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/detection"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/notification"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/storage"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/importers"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/models"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/pathutil"
 )
 
@@ -142,14 +144,33 @@ func (s *Server) registerRoutes() {
 			notif.GET("/log", s.handleListNotifLog)
 		}
 
+		// Retention rules management (R14) — per-camera × per-event-type matrix
+		retention := protected.Group("/retention/rules")
+		{
+			retention.GET("", s.handleListRetentionRules)
+			retention.POST("", s.handleCreateRetentionRule)
+			retention.PUT("/:id", s.handleUpdateRetentionRule)
+			retention.DELETE("/:id", s.handleDeleteRetentionRule)
+		}
+
 		// Face recognition management (Phase 13, R11)
 		faces := protected.Group("/faces")
 		{
 			faces.GET("", s.handleListFaces)
-			faces.POST("", s.handleCreateFace)
+			faces.POST("", s.handleCreateFace)         // raw embedding API (admin)
+			faces.POST("/enroll", s.handleEnrollFace)  // JPEG upload → sentinel-infer (admin, R11)
 			faces.GET("/:id", s.handleGetFace)
 			faces.PUT("/:id", s.handleUpdateFace)
 			faces.DELETE("/:id", s.handleDeleteFace)
+		}
+
+		// AI Model management (R10) — curated download list + manual upload
+		mdls := protected.Group("/models")
+		{
+			mdls.GET("", s.handleListModels)
+			mdls.POST("/:filename/download", s.handleDownloadModel)
+			mdls.POST("/upload", s.handleUploadModel)
+			mdls.DELETE("/:filename", s.handleDeleteModel)
 		}
 
 		// Migration / import (Phase 14, R15)
@@ -2134,10 +2155,11 @@ func (s *Server) handleCreateFace(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name must be 1-128 characters"})
 		return
 	}
-	// ArcFace embeddings are 512-dim; enforce a reasonable range to prevent
-	// storage abuse (a 1M-element array would bloat the BLOB and CPU in cosine similarity).
-	if len(req.Embedding) < 64 || len(req.Embedding) > 2048 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "embedding must have 64-2048 dimensions"})
+	// sentinel-infer uses ArcFace which produces 512-dim unit vectors.
+	// Reject anything else so cosine similarity calculations are consistent
+	// and malformed clients cannot store oversized BLOBs.
+	if len(req.Embedding) != 512 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "embedding must have exactly 512 dimensions (ArcFace)"})
 		return
 	}
 
@@ -2231,6 +2253,92 @@ func (s *Server) handleDeleteFace(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// handleEnrollFace enrolls a new face from a JPEG photo via sentinel-infer (R11).
+// POST /api/v1/faces/enroll — multipart/form-data: name (text field), image (JPEG file)
+// The image is forwarded to sentinel-infer /v1/face/embed; the first detected face
+// embedding is stored. Returns 422 if no face is detected in the photo.
+// When face recognition is disabled (faceRecognizer nil), returns 503.
+func (s *Server) handleEnrollFace(c *gin.Context) {
+	if s.faceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "face recognition not configured"})
+		return
+	}
+	if s.faceRecognizer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "face recognition inference is disabled; use the raw embedding API instead"})
+		return
+	}
+	if !s.requireAdmin(c) {
+		return
+	}
+
+	name := c.PostForm("name")
+	if name == "" || len(name) > 128 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must be 1-128 characters"})
+		return
+	}
+
+	file, err := c.FormFile("image")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image file is required"})
+		return
+	}
+
+	// Limit photo size to 16 MB (generous for a single reference JPEG).
+	const maxPhotoBytes = 16 << 20
+	if file.Size > maxPhotoBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "image must be ≤ 16 MB"})
+		return
+	}
+
+	f, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read uploaded file"})
+		return
+	}
+	defer f.Close()
+
+	jpegBytes, err := io.ReadAll(io.LimitReader(f, maxPhotoBytes))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read image data"})
+		return
+	}
+
+	// Call sentinel-infer to extract face embeddings from the photo (30s budget).
+	embedCtx, embedCancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer embedCancel()
+
+	embeddings, err := s.faceRecognizer.EmbedFaces(embedCtx, jpegBytes, 1)
+	if err != nil {
+		s.logger.Warn("face embed call failed", "error", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("face embedding failed: %v", err)})
+		return
+	}
+	if len(embeddings) == 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no face detected in the uploaded photo"})
+		return
+	}
+
+	// Use the first (and only, max_faces=1) detected face.
+	embedding := embeddings[0].Embedding
+	if len(embedding) != 512 {
+		s.logger.Warn("sentinel-infer returned unexpected embedding dimension",
+			"got", len(embedding), "expected", 512)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected embedding dimension from inference server"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	face, err := s.faceRepo.Create(ctx, name, embedding, "")
+	if err != nil {
+		s.logger.Error("failed to enroll face", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusCreated, face)
 }
 
 // ---------- Migration / Import (Phase 14, R15) ----------
@@ -2367,4 +2475,295 @@ func (s *Server) handleImportExecute(c *gin.Context) {
 		"errors":   importErrors,
 		"warnings": result.Warnings,
 	})
+}
+
+// ─── Retention Rules (R14) ────────────────────────────────────────────────────
+
+// handleListRetentionRules returns all configured retention rules.
+// GET /api/v1/retention/rules
+func (s *Server) handleListRetentionRules(c *gin.Context) {
+	rules, err := s.retentionRepo.List(c.Request.Context())
+	if err != nil {
+		s.logger.Error("retention rules: list failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list retention rules"})
+		return
+	}
+	c.JSON(http.StatusOK, rules)
+}
+
+// handleCreateRetentionRule creates a new retention rule.
+// POST /api/v1/retention/rules
+// Body: {"camera_id": 1, "event_type": "detection", "events_days": 30}
+// camera_id and event_type are optional; omit for wildcard rules.
+func (s *Server) handleCreateRetentionRule(c *gin.Context) {
+	var req struct {
+		CameraID   *int    `json:"camera_id"`
+		EventType  *string `json:"event_type"`
+		EventsDays int     `json:"events_days"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if req.EventsDays < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "events_days must be at least 1"})
+		return
+	}
+	if req.EventType != nil {
+		valid := false
+		for _, t := range storage.KnownEventTypes {
+			if *req.EventType == t {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown event_type; valid types: detection, face_match, audio_detection, camera.online, camera.offline, camera.connected, camera.disconnected, camera.error"})
+			return
+		}
+	}
+
+	rule, err := s.retentionRepo.Create(c.Request.Context(), req.CameraID, req.EventType, req.EventsDays)
+	if err != nil {
+		if errors.Is(err, storage.ErrRuleConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "a rule for this camera/event-type combination already exists"})
+			return
+		}
+		s.logger.Error("retention rules: create failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create retention rule"})
+		return
+	}
+	c.JSON(http.StatusCreated, rule)
+}
+
+// handleUpdateRetentionRule updates the events_days for an existing rule.
+// PUT /api/v1/retention/rules/:id
+// Body: {"events_days": 60}
+func (s *Server) handleUpdateRetentionRule(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule id"})
+		return
+	}
+
+	var req struct {
+		EventsDays int `json:"events_days"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if req.EventsDays < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "events_days must be at least 1"})
+		return
+	}
+
+	rule, err := s.retentionRepo.Update(c.Request.Context(), id, req.EventsDays)
+	if err != nil {
+		if errors.Is(err, storage.ErrRuleNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "retention rule not found"})
+			return
+		}
+		s.logger.Error("retention rules: update failed", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update retention rule"})
+		return
+	}
+	c.JSON(http.StatusOK, rule)
+}
+
+// handleDeleteRetentionRule deletes a retention rule by ID.
+// DELETE /api/v1/retention/rules/:id
+func (s *Server) handleDeleteRetentionRule(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule id"})
+		return
+	}
+
+	if err := s.retentionRepo.Delete(c.Request.Context(), id); err != nil {
+		if errors.Is(err, storage.ErrRuleNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "retention rule not found"})
+			return
+		}
+		s.logger.Error("retention rules: delete failed", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete retention rule"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// ─── Model Management (R10) ─────────────────────────────────────────────────
+
+// modelEntry is the JSON response for a single model in the list.
+type modelEntry struct {
+	Filename    string `json:"filename"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	SizeBytes   int64  `json:"size_bytes"`
+	Installed   bool   `json:"installed"`
+	Curated     bool   `json:"curated"` // true = part of the built-in manifest
+}
+
+// handleListModels returns the curated manifest merged with locally installed models.
+// GET /api/v1/models
+func (s *Server) handleListModels(c *gin.Context) {
+	local, err := s.modelManager.ListLocal()
+	if err != nil {
+		s.logger.Error("models: list local failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list local models"})
+		return
+	}
+	localSet := make(map[string]bool, len(local))
+	for _, f := range local {
+		localSet[f] = true
+	}
+
+	var entries []modelEntry
+
+	// Emit curated manifest entries first with installed status.
+	seen := make(map[string]bool)
+	for _, m := range models.Manifest {
+		entries = append(entries, modelEntry{
+			Filename:    m.Filename,
+			Name:        m.Name,
+			Description: m.Description,
+			SizeBytes:   m.SizeBytes,
+			Installed:   localSet[m.Filename],
+			Curated:     true,
+		})
+		seen[m.Filename] = true
+	}
+
+	// Append locally installed models not in the manifest (user uploads).
+	for _, f := range local {
+		if seen[f] {
+			continue
+		}
+		// Stat the file for size.
+		var size int64
+		cfg := s.snapConfig()
+		if fi, err := os.Stat(filepath.Join(cfg.Models.Dir, f)); err == nil {
+			size = fi.Size()
+		}
+		entries = append(entries, modelEntry{
+			Filename:  f,
+			Name:      f,
+			SizeBytes: size,
+			Installed: true,
+			Curated:   false,
+		})
+	}
+
+	c.JSON(http.StatusOK, entries)
+}
+
+// handleDownloadModel triggers download of a curated model from the manifest.
+// POST /api/v1/models/:filename/download
+func (s *Server) handleDownloadModel(c *gin.Context) {
+	filename := c.Param("filename")
+
+	// Find the model in the curated manifest.
+	var info *models.ModelInfo
+	for _, m := range models.Manifest {
+		if m.Filename == filename {
+			info = &m
+			break
+		}
+	}
+	if info == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "model not found in curated manifest"})
+		return
+	}
+
+	path, err := s.modelManager.EnsureModel(*info)
+	if err != nil {
+		s.logger.Error("models: download failed", "model", filename, "error", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "download failed: " + err.Error()})
+		return
+	}
+
+	s.logger.Info("model downloaded", "model", filename, "path", path)
+	c.JSON(http.StatusOK, gin.H{"filename": filename, "path": path, "status": "installed"})
+}
+
+// handleUploadModel accepts a multipart ONNX file upload.
+// POST /api/v1/models/upload  (multipart/form-data, field "file")
+func (s *Server) handleUploadModel(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing 'file' field: " + err.Error()})
+		return
+	}
+	defer file.Close()
+
+	filename := header.Filename
+	if filepath.Ext(filename) != ".onnx" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only .onnx model files are accepted"})
+		return
+	}
+	// Sanitise filename — strip directory components.
+	filename = filepath.Base(filename)
+
+	cfg := s.snapConfig()
+	if err := os.MkdirAll(cfg.Models.Dir, 0755); err != nil {
+		s.logger.Error("models: mkdir failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create models directory"})
+		return
+	}
+
+	destPath := filepath.Join(cfg.Models.Dir, filename)
+	tmp := destPath + ".upload"
+	f, err := os.Create(tmp)
+	if err != nil {
+		s.logger.Error("models: create temp file failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create temp file"})
+		return
+	}
+
+	written, err := io.Copy(f, file)
+	if closeErr := f.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(tmp)
+		s.logger.Error("models: write failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write model file"})
+		return
+	}
+
+	if err := os.Rename(tmp, destPath); err != nil {
+		os.Remove(tmp)
+		s.logger.Error("models: rename failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save model file"})
+		return
+	}
+
+	s.logger.Info("model uploaded", "model", filename, "bytes", written)
+	c.JSON(http.StatusCreated, gin.H{"filename": filename, "size_bytes": written, "status": "installed"})
+}
+
+// handleDeleteModel removes a locally installed model file.
+// DELETE /api/v1/models/:filename
+func (s *Server) handleDeleteModel(c *gin.Context) {
+	filename := filepath.Base(c.Param("filename"))
+	if filepath.Ext(filename) != ".onnx" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid model filename"})
+		return
+	}
+
+	cfg := s.snapConfig()
+	path := filepath.Join(cfg.Models.Dir, filename)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "model file not found"})
+		return
+	}
+
+	if err := os.Remove(path); err != nil {
+		s.logger.Error("models: delete failed", "model", filename, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete model file"})
+		return
+	}
+
+	s.logger.Info("model deleted", "model", filename)
+	c.Status(http.StatusNoContent)
 }

@@ -108,9 +108,14 @@ class ApiClient extends ChangeNotifier {
 
   /// Serialize the cookie jar's cookies for a given URL into a Cookie header string.
   /// Used to authenticate the WebSocket upgrade request.
+  /// The cookie jar stores cookies keyed to http(s) URLs, so ws(s) schemes are
+  /// converted before lookup — otherwise loadForRequest finds nothing.
   Future<String?> cookieHeader(String url) async {
     if (_cookieJar == null) return null;
-    final uri = Uri.parse(url);
+    final httpUrl = url
+        .replaceFirst('wss://', 'https://')
+        .replaceFirst('ws://', 'http://');
+    final uri = Uri.parse(httpUrl);
     final cookies = await _cookieJar!.loadForRequest(uri);
     if (cookies.isEmpty) return null;
     return cookies.map((c) => '${c.name}=${c.value}').join('; ');

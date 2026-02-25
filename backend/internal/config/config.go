@@ -19,10 +19,19 @@ type Config struct {
 	Storage       StorageConfig      `yaml:"storage"`
 	Database      DatabaseConfig     `yaml:"database"`
 	Detection     DetectionConfig    `yaml:"detection"`
+	Models        ModelsConfig       `yaml:"models"`        // R10: AI model management
 	Go2RTC        Go2RTCConfig       `yaml:"go2rtc"`
 	Cameras       []CameraConfig     `yaml:"cameras"`
 	Watchdog      WatchdogConfig     `yaml:"watchdog"`
 	Relay         RelayConfig        `yaml:"relay"`     // Phase 12: remote access via TURN relay (CG11, R8)
+}
+
+// ModelsConfig holds AI model management settings (R10).
+// ModelsDir is where ONNX model files are stored; BaseURL points to a remote
+// server for one-click downloads (empty = manual install only).
+type ModelsConfig struct {
+	Dir     string `yaml:"dir"`      // default "/data/models"
+	BaseURL string `yaml:"base_url"` // e.g. "https://models.sentinel-nvr.dev/v1"; empty = manual only
 }
 
 // NotificationConfig holds push notification provider settings (Phase 8, R9).
@@ -110,6 +119,12 @@ type StorageConfig struct {
 	ColdRetentionDays int    `yaml:"cold_retention_days"`
 	SegmentDuration   int    `yaml:"segment_duration"`
 	SegmentFormat     string `yaml:"segment_format"`
+	// MigrationIntervalHours controls how often the hot→cold migrator runs.
+	// Default: 1 (once per hour). Increase on low-I/O systems.
+	MigrationIntervalHours int `yaml:"migration_interval_hours"`
+	// CleanupIntervalHours controls how often the cold-retention cleaner runs.
+	// Default: 6. Decrease for tighter space management; increase to reduce I/O.
+	CleanupIntervalHours int `yaml:"cleanup_interval_hours"`
 }
 
 // DatabaseConfig holds SQLite database settings (CG2).
@@ -230,11 +245,20 @@ func Validate(cfg *Config) error {
 	if cfg.Storage.ColdPath != "" && !filepath.IsAbs(cfg.Storage.ColdPath) {
 		return fmt.Errorf("storage.cold_path must be an absolute path, got %q", cfg.Storage.ColdPath)
 	}
+	if cfg.Storage.ColdPath != "" && filepath.Clean(cfg.Storage.HotPath) == filepath.Clean(cfg.Storage.ColdPath) {
+		return fmt.Errorf("storage.hot_path and storage.cold_path must be different directories")
+	}
 	if cfg.Storage.HotRetentionDays < 1 {
 		return fmt.Errorf("storage.hot_retention_days must be >= 1, got %d", cfg.Storage.HotRetentionDays)
 	}
 	if cfg.Storage.ColdPath != "" && cfg.Storage.ColdRetentionDays < 1 {
 		return fmt.Errorf("storage.cold_retention_days must be >= 1, got %d", cfg.Storage.ColdRetentionDays)
+	}
+	if cfg.Storage.MigrationIntervalHours < 1 {
+		return fmt.Errorf("storage.migration_interval_hours must be >= 1, got %d", cfg.Storage.MigrationIntervalHours)
+	}
+	if cfg.Storage.CleanupIntervalHours < 1 {
+		return fmt.Errorf("storage.cleanup_interval_hours must be >= 1, got %d", cfg.Storage.CleanupIntervalHours)
 	}
 
 	if cfg.Storage.SegmentFormat != "" && cfg.Storage.SegmentFormat != "mp4" {
@@ -437,6 +461,12 @@ func setDefaults(cfg *Config) {
 		// in VLC, browsers, etc. without needing an init segment (CG4).
 		cfg.Storage.SegmentFormat = "mp4"
 	}
+	if cfg.Storage.MigrationIntervalHours == 0 {
+		cfg.Storage.MigrationIntervalHours = 1
+	}
+	if cfg.Storage.CleanupIntervalHours == 0 {
+		cfg.Storage.CleanupIntervalHours = 6
+	}
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = "/data/sentinel.db"
 	}
@@ -521,5 +551,10 @@ func setDefaults(cfg *Config) {
 	// Relay defaults (Phase 12, CG11)
 	if cfg.Relay.STUNServer == "" {
 		cfg.Relay.STUNServer = "stun:stun.l.google.com:19302"
+	}
+
+	// Models defaults (R10)
+	if cfg.Models.Dir == "" {
+		cfg.Models.Dir = "/data/models"
 	}
 }

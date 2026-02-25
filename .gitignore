@@ -4,6 +4,7 @@ bin/
 
 # Go
 backend/vendor/
+*.out
 
 # Node
 frontend/node_modules/

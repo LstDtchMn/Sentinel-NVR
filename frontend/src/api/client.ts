@@ -305,6 +305,29 @@ export interface StorageStats {
 }
 
 /**
+ * Per-camera × per-event-type retention rule (R14).
+ * camera_id=null and event_type=null act as wildcards.
+ */
+export interface RetentionRule {
+  id: number;
+  camera_id: number | null;
+  event_type: string | null;
+  events_days: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** AI model entry returned by GET /models (R10). */
+export interface ModelEntry {
+  filename: string;
+  name: string;
+  description: string;
+  size_bytes: number;
+  installed: boolean;
+  curated: boolean;
+}
+
+/**
  * Combines two AbortSignals so aborting either one aborts the result.
  * Uses the native AbortSignal.any() when available (Chrome 116+, Firefox 124+,
  * Safari 17.4+), with a manual fallback for older browsers.
@@ -709,6 +732,43 @@ class ApiClient {
     await this.request(`/faces/${id}`, { method: "DELETE", signal });
   }
 
+  /**
+   * Enrolls a face from a JPEG photo (admin only, R11).
+   * The image is forwarded to sentinel-infer; the first detected face embedding is stored.
+   * Returns 422 when no face is detected and 503 when face recognition is disabled.
+   */
+  async enrollFaceFromPhoto(
+    name: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<FaceRecord> {
+    const formData = new FormData();
+    formData.append("name", name);
+    formData.append("image", file);
+    const timeoutCtrl = new AbortController();
+    const timeoutId = setTimeout(() => timeoutCtrl.abort(), 45_000); // 45s: infer can be slow
+    const sig = signal
+      ? combineSignals(signal, timeoutCtrl.signal)
+      : timeoutCtrl.signal;
+    try {
+      const resp = await fetch(`${API_BASE}/faces/enroll`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+        signal: sig,
+      });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        throw new Error(`API error ${resp.status}: ${detail}`);
+      }
+      return (await resp.json()) as FaceRecord;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   // --- Migration / Import (Phase 14, R15) ---
 
   /**
@@ -746,6 +806,94 @@ class ApiClient {
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  // --- Retention Rules (R14) ---
+
+  /** Lists all retention rules (GET /retention/rules). */
+  async listRetentionRules(signal?: AbortSignal): Promise<RetentionRule[]> {
+    return this.request<RetentionRule[]>("/retention/rules", { signal });
+  }
+
+  /**
+   * Creates a retention rule (POST /retention/rules).
+   * Omit camera_id for a global rule; omit event_type to cover all event types.
+   */
+  async createRetentionRule(
+    body: { camera_id?: number | null; event_type?: string | null; events_days: number },
+    signal?: AbortSignal,
+  ): Promise<RetentionRule> {
+    return this.request<RetentionRule>("/retention/rules", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  /** Updates events_days for an existing rule (PUT /retention/rules/:id). */
+  async updateRetentionRule(
+    id: number,
+    events_days: number,
+    signal?: AbortSignal,
+  ): Promise<RetentionRule> {
+    return this.request<RetentionRule>(`/retention/rules/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ events_days }),
+      signal,
+    });
+  }
+
+  /** Deletes a retention rule (DELETE /retention/rules/:id). */
+  async deleteRetentionRule(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/retention/rules/${id}`, { method: "DELETE", signal });
+  }
+
+  // --- AI Model Management (R10) ---
+
+  /** Lists all models (curated manifest + locally installed). */
+  async listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
+    return this.request<ModelEntry[]>("/models", { signal });
+  }
+
+  /** Triggers download of a curated model by filename. */
+  async downloadModel(filename: string, signal?: AbortSignal): Promise<{ filename: string; status: string }> {
+    return this.request<{ filename: string; status: string }>(`/models/${encodeURIComponent(filename)}/download`, {
+      method: "POST",
+      signal,
+    });
+  }
+
+  /** Uploads a custom ONNX model file. */
+  async uploadModel(file: File, signal?: AbortSignal): Promise<{ filename: string; size_bytes: number; status: string }> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const timeoutCtrl = new AbortController();
+    const timeoutId = setTimeout(() => timeoutCtrl.abort(), 300_000); // 5 min for large models
+    const sig = signal
+      ? combineSignals(signal, timeoutCtrl.signal)
+      : timeoutCtrl.signal;
+    try {
+      const resp = await fetch(`${API_BASE}/models/upload`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+        signal: sig,
+      });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        throw new Error(`API error ${resp.status}: ${detail}`);
+      }
+      return (await resp.json()) as { filename: string; size_bytes: number; status: string };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /** Deletes a locally installed model by filename. */
+  async deleteModel(filename: string, signal?: AbortSignal): Promise<void> {
+    await this.request(`/models/${encodeURIComponent(filename)}`, { method: "DELETE", signal });
   }
 
   /** Executes the import — creates cameras from the uploaded file (admin only). */

@@ -4,7 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut, Users, Upload } from "lucide-react";
+import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut, Users, Upload, Box } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -15,6 +15,7 @@ const navItems = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/cameras", label: "Cameras", icon: Camera },
   { to: "/faces", label: "Faces", icon: Users },
+  { to: "/models", label: "Models", icon: Box },
   { to: "/import", label: "Import", icon: Upload, adminOnly: true },
   { to: "/notifications", label: "Notifications", icon: Bell },
   { to: "/settings", label: "Settings", icon: Settings },

@@ -1,9 +1,10 @@
 // Sentinel NVR — the main entry point.
 // Startup order: config → validate → logging → SQLite → event bus → auth (keys + admin) →
-//   camera repo (seed) → go2rtc → camera manager → storage manager → HTTP server.
+//   camera repo (seed) → go2rtc → detector (+ sentinel-infer subprocess if backend=onnx) →
+//   camera manager → watchdog → storage manager → HTTP server.
 // Graceful shutdown on SIGINT/SIGTERM with 30s timeout.
 // Shutdown order: event bus (unblocks SSE handlers) → persister (drain) → HTTP server →
-//   cameras → storage → watchdog → database.
+//   cameras → sentinel-infer → storage → watchdog → database.
 package main
 
 import (
@@ -34,6 +35,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/storage"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/watchdog"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/go2rtc"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/models"
 )
 
 // version is set at build time via -ldflags="-X main.version=x.y.z".
@@ -144,10 +146,6 @@ func main() {
 		logger.Info("OIDC provider initialized", "provider", cfg.Auth.OIDC.ProviderURL)
 	}
 
-	// Initialize and start watchdog (R4)
-	wd := watchdog.New(&cfg.Watchdog, logger)
-	go wd.Start()
-
 	// Initialize camera repository and seed from config (one-time YAML → DB migration)
 	camRepo := camera.NewRepository(database, authService)
 	if err := camRepo.SeedFromConfig(context.Background(), cfg.Cameras); err != nil {
@@ -195,6 +193,26 @@ func main() {
 	if detector != nil {
 		logger.Info("detection backend initialized", "backend", cfg.Detection.Backend)
 	}
+
+	// Wire the Startable interface for detectors that manage a subprocess lifecycle.
+	// LocalDetector (backend=onnx) launches sentinel-infer and waits for its /health
+	// endpoint before returning — ensuring inference is available when the first camera
+	// pipeline starts. startableDetector is nil for remote and mock backends.
+	var startableDetector detection.Startable
+	if detector != nil {
+		if sd, ok := detector.(detection.Startable); ok {
+			inferCtx, inferCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := sd.Start(inferCtx); err != nil {
+				inferCancel()
+				logger.Error("failed to start local inference server", "error", err)
+				os.Exit(1)
+			}
+			inferCancel()
+			startableDetector = sd
+			logger.Info("local inference server started", "backend", cfg.Detection.Backend)
+		}
+	}
+
 	detRepo := detection.NewRepository(database)
 	logger.Info("event repository initialized") // always active; serves /api/v1/events regardless of detection.enabled
 
@@ -253,9 +271,10 @@ func main() {
 	faceRepo := detection.NewFaceRepository(database)
 
 	// Build optional pipeline dependencies (Phase 13, R11/R12).
+	// faceRecognizer is also passed to server.New for the JPEG enrollment endpoint (R11).
 	var pipeDeps *camera.PipelineDeps
+	var faceRecognizer detection.FaceRecognizer
 	{
-		var faceRecognizer detection.FaceRecognizer
 		if cfg.Detection.FaceRecognition.Enabled && cfg.Detection.Enabled {
 			faceRecognizer = detection.NewRemoteFaceRecognizer(
 				fmt.Sprintf("http://127.0.0.1:%d", cfg.Detection.InferencePort),
@@ -301,16 +320,25 @@ func main() {
 	}
 	startCancel()
 
+	// Initialize and start watchdog (R4) — must come after the camera manager so it can
+	// monitor pipeline health and restart failed cameras via camManager.RestartCamera.
+	wd := watchdog.New(&cfg.Watchdog, &cfg.Storage, camManager, bus, logger)
+	go wd.Start()
+
 	// Initialize and start storage manager (hot→cold migration + cold retention cleanup, R13/R14).
-	storageManager := storage.NewManager(&cfg.Storage, recRepo, logger)
+	retentionRepo := storage.NewRetentionRepository(database)
+	storageManager := storage.NewManager(&cfg.Storage, recRepo, retentionRepo, detRepo, logger)
 	if err := storageManager.Start(); err != nil {
 		logger.Error("storage manager failed to start", "error", err)
 		os.Exit(1)
 	}
 
+	// Initialize model manager (R10).
+	modelMgr := models.NewManager(cfg.Models.Dir, cfg.Models.BaseURL, logger)
+
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, g2rClient, bus, notifRepo, logger)
+	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, modelMgr, g2rClient, bus, notifRepo, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err
@@ -350,6 +378,9 @@ func main() {
 	}
 
 	camManager.Stop()      // bus.Publish is a safe no-op after bus.Close()
+	if startableDetector != nil {
+		startableDetector.Stop() // send SIGINT to sentinel-infer after the last detection frame
+	}
 	storageManager.Stop() // cancel worker contexts and wait for in-flight batch to finish
 	wd.Stop()
 
