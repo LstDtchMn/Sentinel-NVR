@@ -42,10 +42,15 @@ func SanitizeName(name string) string {
 }
 
 // allowedStreamSchemes lists the protocols accepted for camera stream URLs.
+// http/https are included for MJPEG-over-HTTP cameras (e.g. older IP cameras
+// that don't expose RTSP). go2rtc handles the HTTP→RTSP conversion internally
+// so the rest of the pipeline (recording, detection, live view) is unchanged.
 var allowedStreamSchemes = map[string]bool{
 	"rtsp":  true,
 	"rtsps": true,
 	"rtmp":  true,
+	"http":  true,
+	"https": true,
 }
 
 // ValidateCameraInput checks a camera record for invalid or dangerous values.
@@ -83,7 +88,7 @@ func validateStreamURL(raw string) error {
 		return fmt.Errorf("malformed URL")
 	}
 	if !allowedStreamSchemes[strings.ToLower(u.Scheme)] {
-		return fmt.Errorf("unsupported protocol %q (must be rtsp, rtsps, or rtmp)", u.Scheme)
+		return fmt.Errorf("unsupported protocol %q (must be rtsp, rtsps, rtmp, http, or https)", u.Scheme)
 	}
 	if u.Host == "" {
 		return fmt.Errorf("missing host")

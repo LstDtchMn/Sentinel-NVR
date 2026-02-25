@@ -341,6 +341,9 @@ function AddCameraForm({
               required
               className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
             />
+            <p className="mt-1 text-xs text-faint">
+              Supports rtsp://, rtsps://, rtmp://, and http:// / https:// (MJPEG)
+            </p>
           </div>
         </div>
 
@@ -470,6 +473,9 @@ function EditCameraForm({
               required
               className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
             />
+            <p className="mt-1 text-xs text-faint">
+              Supports rtsp://, rtsps://, rtmp://, and http:// / https:// (MJPEG)
+            </p>
           </div>
         </div>
 

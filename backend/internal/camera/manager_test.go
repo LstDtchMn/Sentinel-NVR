@@ -123,10 +123,22 @@ func TestValidateCameraInput(t *testing.T) {
 		t.Error("empty main_stream should fail")
 	}
 
-	// Invalid protocol
-	badProto := &CameraRecord{Name: "test", MainStream: "http://192.168.1.1/stream"}
+	// HTTP MJPEG stream (e.g. older IP camera CGI endpoint)
+	httpCam := &CameraRecord{Name: "test", MainStream: "http://192.168.1.1/video.cgi"}
+	if err := ValidateCameraInput(httpCam); err != nil {
+		t.Errorf("http MJPEG stream should be valid: %v", err)
+	}
+
+	// HTTPS MJPEG stream
+	httpsCam := &CameraRecord{Name: "test", MainStream: "https://192.168.1.1/video.cgi"}
+	if err := ValidateCameraInput(httpsCam); err != nil {
+		t.Errorf("https MJPEG stream should be valid: %v", err)
+	}
+
+	// Still-invalid protocol
+	badProto := &CameraRecord{Name: "test", MainStream: "ftp://192.168.1.1/stream"}
 	if err := ValidateCameraInput(badProto); err == nil {
-		t.Error("http protocol should fail (only rtsp/rtsps/rtmp)")
+		t.Error("ftp protocol should fail")
 	}
 
 	// Valid with sub-stream
