@@ -1002,6 +1002,10 @@ func (s *Server) handlePlayRecording(c *gin.Context) {
 // Uses separate contexts for the Get and Delete operations so a slow Get cannot
 // consume the full budget and leave the Delete with no time remaining.
 func (s *Server) handleDeleteRecording(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid recording ID"})
@@ -1326,6 +1330,10 @@ func (s *Server) handleEventThumbnail(c *gin.Context) {
 // handleDeleteEvent deletes an event from the DB and removes the thumbnail file.
 // DB record is deleted first — a leaked file is recoverable; a dangling DB row is not.
 func (s *Server) handleDeleteEvent(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid event ID"})

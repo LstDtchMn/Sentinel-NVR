@@ -75,8 +75,10 @@ func (w *WebhookSender) Send(ctx context.Context, token string, notif Notificati
 	if err != nil {
 		return fmt.Errorf("webhook: POST to %q: %w", token, err)
 	}
-	// Always drain and close the body to allow HTTP keep-alive connection reuse.
-	b, _ := io.ReadAll(resp.Body)
+	// Drain and close the body to allow HTTP keep-alive connection reuse.
+	// Cap at 1 MiB to prevent a malicious webhook endpoint from causing OOM.
+	const maxResponseBytes = 1 << 20
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

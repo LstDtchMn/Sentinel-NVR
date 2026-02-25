@@ -130,7 +130,7 @@ func main() {
 		}
 		logger.Info("auth service initialized")
 	} else {
-		logger.Warn("authentication is disabled (auth.enabled=false) — all API endpoints are publicly accessible")
+		logger.Warn("authentication is DISABLED — all API routes are publicly accessible; set auth.enabled=true in sentinel.yml for production use")
 	}
 
 	// Initialize OIDC provider when SSO is configured (Phase 7, CG6).
