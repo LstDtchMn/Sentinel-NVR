@@ -437,8 +437,7 @@ func (r *Recorder) buildFFmpegArgs() []string {
 		"-loglevel", "warning",
 		// Input: go2rtc RTSP re-stream (TCP transport for reliability)
 		"-rtsp_transport", "tcp",
-		"-stimeout", "10000000", // RTSP socket timeout for ffmpeg < 5.x
-		"-timeout", "10000000",  // RTSP socket timeout for ffmpeg >= 5.x (renamed from -stimeout)
+		"-timeout", "10000000", // RTSP socket timeout (μs); ffmpeg 5.x+ (renamed from -stimeout)
 		"-i", fmt.Sprintf("%s/%s", strings.TrimRight(r.rtspBase, "/"), r.cam.Name),
 		// Output: copy streams (zero transcoding)
 		"-c", "copy",
