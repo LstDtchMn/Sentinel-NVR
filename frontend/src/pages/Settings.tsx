@@ -117,7 +117,7 @@ export default function Settings() {
   const dirty = config != null && (
     logLevel !== (config.server.log_level || "info") ||
     hotRetention !== config.storage.hot_retention_days ||
-    coldRetention !== config.storage.cold_retention_days ||
+    coldRetention !== Math.max(1, config.storage.cold_retention_days) ||
     segmentDuration !== config.storage.segment_duration
   );
 

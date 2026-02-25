@@ -62,7 +62,10 @@ GoRouter buildRouter(AuthService auth) {
                 GoRoute(
                   path: ':id',
                   builder: (context, state) => _EventDetailScreen(
-                    eventId: int.parse(state.pathParameters['id']!),
+                    // Use tryParse + null-coalesce so a malformed or absent
+                    // ':id' deep-link parameter never throws — the screen
+                    // shows an error instead of crashing the app.
+                    eventId: int.tryParse(state.pathParameters['id'] ?? '') ?? 0,
                   ),
                 ),
               ],

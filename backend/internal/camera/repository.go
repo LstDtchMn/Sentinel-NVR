@@ -248,7 +248,8 @@ func (r *Repository) SeedFromConfig(ctx context.Context, cameras []config.Camera
 		return fmt.Errorf("checking camera count for seed: %w", err)
 	}
 	if count > 0 {
-		return nil // DB already has cameras, skip seeding
+		_ = tx.Rollback() // explicit: read-only tx, nothing to commit
+		return nil        // DB already has cameras, skip seeding
 	}
 
 	for _, cam := range cameras {

@@ -301,6 +301,9 @@ class ApiClient extends ChangeNotifier {
       options: Options(responseType: ResponseType.stream),
       cancelToken: cancelToken,
     );
+    // Guard: a non-streaming response (e.g. 401 before the SSE upgrade) sets
+    // resp.data to null; null-asserting it would throw an unhandled exception.
+    if (resp.data == null) return;
     var buffer = '';
     await for (final chunk in resp.data!.stream.transform(utf8.decoder)) {
       buffer += chunk;

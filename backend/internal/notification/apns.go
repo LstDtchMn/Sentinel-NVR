@@ -161,6 +161,7 @@ func (a *APNsSender) getAuthJWT() (string, error) {
 	claims := jwt.MapClaims{
 		"iss": a.teamID,
 		"iat": now.Unix(),
+		"exp": now.Add(time.Hour).Unix(), // APNs JWTs are valid for up to 1 hour
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
 	token.Header["kid"] = a.keyID

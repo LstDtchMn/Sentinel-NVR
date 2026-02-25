@@ -422,7 +422,7 @@ func persistEvents(database *sql.DB, recRepo *recording.Repository, bus *eventbu
 					clipCtx, clipCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					_, clipErr := database.ExecContext(clipCtx,
 						`UPDATE events SET has_clip = 1
-						 WHERE type = 'detection'
+						 WHERE type IN ('detection', 'face_match', 'audio_detection')
 						   AND camera_id = ?
 						   AND start_time >= ?
 						   AND start_time < ?
@@ -461,7 +461,8 @@ func persistEvents(database *sql.DB, recRepo *recording.Repository, bus *eventbu
 		// In the common case (detection during active recording) the segment isn't in the DB
 		// yet, ExistsForCameraAtTime returns false, and has_clip is updated retroactively above.
 		hasClip := 0
-		if event.Type == "detection" && event.CameraID != 0 {
+		isDetectionType := event.Type == "detection" || event.Type == "face_match" || event.Type == "audio_detection"
+		if isDetectionType && event.CameraID != 0 {
 			clipCtx, clipCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			exists, clipErr := recRepo.ExistsForCameraAtTime(clipCtx, event.CameraID, event.Timestamp)
 			clipCancel()

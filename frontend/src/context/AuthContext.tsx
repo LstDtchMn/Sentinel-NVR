@@ -59,14 +59,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { mountedRef.current = false; };
   }, []);
 
-  // Check session and setup state on mount. /setup/status is fetched first (public
-  // endpoint) to discover oidcEnabled and whether first-run setup is needed. Then
-  // /auth/me is attempted to restore an existing session. Both fetches share the same
-  // abort signal so StrictMode double-mount doesn't leave orphaned requests.
+  // Check session and setup state on mount. Both /setup/status and /auth/me are
+  // fetched concurrently; loading is cleared only after BOTH settle so that
+  // ProtectedRoute never sees loading=false with needsSetup still null (which
+  // could briefly redirect to the wrong route on first run).
   useEffect(() => {
     const ctrl = new AbortController();
 
-    api
+    const checkSetupP = api
       .checkSetup(ctrl.signal)
       .then(({ needs_setup, oidc_enabled }) => {
         if (mountedRef.current) {
@@ -80,17 +80,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (mountedRef.current) setNeedsSetup(false);
       });
 
-    api
+    const getMeP = api
       .getMe(ctrl.signal)
       .then((u) => { if (mountedRef.current) setUser(u); })
       .catch(() => {
         if (ctrl.signal.aborted) return; // StrictMode cleanup abort — second mount handles it
         if (mountedRef.current) setUser(null);
-      })
-      .finally(() => {
-        if (ctrl.signal.aborted) return; // Don't clear loading=false for the aborted first pass
-        if (mountedRef.current) setLoading(false);
       });
+
+    // Clear loading only after both promises settle — prevents the brief window
+    // where loading=false but needsSetup is still null (wrong route flash).
+    Promise.allSettled([checkSetupP, getMeP]).then(() => {
+      if (ctrl.signal.aborted) return;
+      if (mountedRef.current) setLoading(false);
+    });
 
     return () => ctrl.abort();
   }, []);

@@ -288,9 +288,15 @@ func (m *Manager) runCleaner(ctx context.Context) {
 }
 
 // runCleanerOnce processes one batch pass: delete all recordings older than
-// cold_retention_days from both hot and cold storage.
+// the effective retention period from both hot and cold storage.
+// When cold storage is disabled (ColdPath==""), falls back to HotRetentionDays
+// to prevent cutoff=now from deleting every recording on every cleanup cycle.
 func (m *Manager) runCleanerOnce(ctx context.Context) {
-	cutoff := time.Now().AddDate(0, 0, -m.cfg.ColdRetentionDays)
+	retentionDays := m.cfg.ColdRetentionDays
+	if m.cfg.ColdPath == "" || retentionDays <= 0 {
+		retentionDays = m.cfg.HotRetentionDays
+	}
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 	deleted, failed := 0, 0
 	var afterID int // cursor: advance past every batch to prevent re-querying failed records
 
@@ -563,6 +569,9 @@ func (m *Manager) runEventCleanerOnce(ctx context.Context) {
 	// any (camera, type) pair not yet handled by a camera-specific rule above.
 	// Excludes cameras that already have a specific rule for the type.
 	globalDays := m.cfg.ColdRetentionDays // default: use cold retention as event TTL
+	if m.cfg.ColdPath == "" || globalDays <= 0 {
+		globalDays = m.cfg.HotRetentionDays // cold disabled — fall back to hot retention
+	}
 	for _, evType := range KnownEventTypes {
 		days := effectiveDays(-1, evType)
 		if days < 0 {

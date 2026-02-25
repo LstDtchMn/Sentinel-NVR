@@ -151,6 +151,9 @@ export default function TimelineBar({
   const segmentNodes = useMemo(
     () =>
       segments.map((seg) => {
+        // Skip in-progress segments that have no end_time yet — they have no
+        // fixed end boundary and would render with segEnd=NaN causing a crash.
+        if (!seg.end_time) return null;
         const segStart = isoToSecondsSinceMidnight(seg.start_time);
         const segEnd = isoToSecondsSinceMidnight(seg.end_time);
         const left = toPercent(segStart);

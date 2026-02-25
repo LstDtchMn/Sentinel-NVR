@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -427,10 +428,11 @@ func (r *Recorder) ensureDirectories() error {
 func (r *Recorder) buildFFmpegArgs() []string {
 	sanitized := SanitizeName(r.cam.Name)
 	segDurationSec := r.segmentDuration * 60
-	// filepath.ToSlash ensures forward-slash separators on all platforms.
-	// ffmpeg's strftime expansion is performed by its C runtime, which requires
-	// forward slashes in the path template regardless of OS.
+	// ffmpeg's strftime expansion requires forward slashes in the template path.
+	// filepath.ToSlash only converts the OS separator, so additionally replace
+	// any literal backslashes when a Windows-style hotPath is provided.
 	outputPattern := filepath.ToSlash(filepath.Join(r.hotPath, sanitized, "%Y-%m-%d", "%H", "%M.%S.mp4"))
+	outputPattern = strings.ReplaceAll(outputPattern, "\\", "/")
 
 	return []string{
 		"-hide_banner",
@@ -438,7 +440,7 @@ func (r *Recorder) buildFFmpegArgs() []string {
 		// Input: go2rtc RTSP re-stream (TCP transport for reliability)
 		"-rtsp_transport", "tcp",
 		"-timeout", "10000000", // RTSP socket timeout (μs); ffmpeg 5.x+ (renamed from -stimeout)
-		"-i", fmt.Sprintf("%s/%s", strings.TrimRight(r.rtspBase, "/"), r.cam.Name),
+		"-i", fmt.Sprintf("%s/%s", strings.TrimRight(r.rtspBase, "/"), url.PathEscape(r.cam.Name)),
 		// Output: copy streams (zero transcoding)
 		"-c", "copy",
 		// Segment muxer configuration

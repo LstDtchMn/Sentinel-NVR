@@ -152,13 +152,19 @@ func (f *FCMSender) Send(ctx context.Context, token string, notif Notification) 
 
 // getAccessToken returns a cached or freshly-fetched OAuth2 access token.
 // The token is refreshed 60 seconds before expiry.
+//
+// The mutex is NOT held during the HTTP token exchange to avoid serialising all
+// concurrent FCM sends behind a potentially slow network call. Two goroutines
+// may race to refresh an expired token; both will receive a valid token and the
+// second write is harmless (it just overwrites with another valid token).
 func (f *FCMSender) getAccessToken(ctx context.Context) (string, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	if f.accessToken != "" && time.Now().Before(f.tokenExpiry.Add(-60*time.Second)) {
-		return f.accessToken, nil
+		tok := f.accessToken
+		f.mu.Unlock()
+		return tok, nil
 	}
+	f.mu.Unlock()
 
 	// Sign a JWT for the Google OAuth2 token exchange.
 	now := time.Now()
@@ -174,7 +180,7 @@ func (f *FCMSender) getAccessToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("signing service-account JWT: %w", err)
 	}
 
-	// Exchange for an access token.
+	// Exchange for an access token (lock NOT held — HTTP can block for seconds).
 	form := url.Values{
 		"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
 		"assertion":  {signed},
@@ -210,13 +216,19 @@ func (f *FCMSender) getAccessToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("empty access_token in response")
 	}
 
-	f.accessToken = tokenResp.AccessToken
+	// Store under lock — a concurrent goroutine may have also refreshed; that's OK.
+	var expiry time.Time
 	if tokenResp.ExpiresIn > 0 {
-		f.tokenExpiry = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+		expiry = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	} else {
-		f.tokenExpiry = now.Add(time.Hour)
+		expiry = now.Add(time.Hour)
 	}
-	return f.accessToken, nil
+	f.mu.Lock()
+	f.accessToken = tokenResp.AccessToken
+	f.tokenExpiry = expiry
+	tok := f.accessToken
+	f.mu.Unlock()
+	return tok, nil
 }
 
 // buildAPSPayload builds the Apple Push Notification Service (APS) payload object.

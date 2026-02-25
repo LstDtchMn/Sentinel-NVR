@@ -112,7 +112,11 @@ class AuthService extends ChangeNotifier {
   /// Biometric + PIN unlock.  Only succeeds if the existing session cookie is
   /// still valid (i.e. we can GET /auth/me successfully after biometric auth).
   Future<bool> biometricUnlock(ApiClient api) async {
-    final canCheck = await _localAuth.canCheckBiometrics;
+    // canCheckBiometrics is false on devices with no enrolled biometrics (e.g.
+    // PIN only). isDeviceSupported() returns true for any local auth method,
+    // so check both to allow PIN-only devices through.
+    final canCheck = (await _localAuth.canCheckBiometrics) ||
+        (await _localAuth.isDeviceSupported());
     if (!canCheck) return false;
 
     final authenticated = await _localAuth.authenticate(

@@ -228,14 +228,30 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down all camera pipelines and waits for their
 // goroutines to finish.
+//
+// Pipelines are stopped outside the write lock to avoid holding it for the
+// full Stop() duration (each pipeline Stop() can block ~5 s waiting for
+// ffmpeg to exit), which would otherwise prevent concurrent ListCameras /
+// GetCamera reads from completing.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	m.stopped = true // prevent Start() from adding new pipelines after this point
+	pipelines := make([]struct {
+		name string
+		p    *Pipeline
+	}, 0, len(m.cameras))
 	for name, pipeline := range m.cameras {
-		m.logger.Info("stopping camera pipeline", "name", name)
-		pipeline.Stop()
+		pipelines = append(pipelines, struct {
+			name string
+			p    *Pipeline
+		}{name, pipeline})
 	}
 	m.mu.Unlock()
+
+	for _, entry := range pipelines {
+		m.logger.Info("stopping camera pipeline", "name", entry.name)
+		entry.p.Stop()
+	}
 
 	m.wg.Wait()
 	m.logger.Info("all camera pipelines stopped")

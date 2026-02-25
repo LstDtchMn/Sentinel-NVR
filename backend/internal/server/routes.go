@@ -544,7 +544,6 @@ func (s *Server) handleUpdateConfig(c *gin.Context) {
 
 	s.cfgMu.Lock()
 	// Stage all changes in a local copy so a validation failure never corrupts the live config.
-	oldCfg := *s.cfg // snapshot for rollback on save failure
 	cfgCopy := *s.cfg
 	if input.Server != nil && input.Server.LogLevel != "" {
 		cfgCopy.Server.LogLevel = input.Server.LogLevel
@@ -582,13 +581,11 @@ func (s *Server) handleUpdateConfig(c *gin.Context) {
 		toSave := *s.cfg
 		s.cfgMu.RUnlock()
 		if err := config.Save(s.configPath, &toSave); err != nil {
-			// Rollback in-memory config so it matches what's on disk.
-			s.cfgMu.Lock()
-			*s.cfg = oldCfg
-			s.cfgMu.Unlock()
-			if input.Server != nil && input.Server.LogLevel != "" && s.logLevel != nil {
-				s.logLevel.Set(parseSlogLevel(oldCfg.Server.LogLevel))
-			}
+			// Do NOT roll back the in-memory config: rolling back with a captured
+			// oldCfg snapshot would race with concurrent PUT /config requests and
+			// could overwrite a newer successful write. The in-memory config is
+			// already valid; on next restart the stale disk value is overwritten by
+			// the first successful save or operator intervention.
 			s.logger.Error("failed to save config", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save config"})
 			return
@@ -1512,7 +1509,7 @@ func (s *Server) handleEventStream(c *gin.Context) {
 // This lets clients distinguish "don't touch zones" (omit field / send null) from
 // "remove all zones" (send []).
 func normalizeZonesRaw(raw json.RawMessage) json.RawMessage {
-	if string(raw) == "null" {
+	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
 	return raw
@@ -2040,7 +2037,7 @@ func (s *Server) handlePairingRedeem(c *gin.Context) {
 		return
 	}
 
-	s.loginLimiter.reset(ip)
+	s.loginLimiter.reset(ip + "_pairing") // match the namespace used in allow() above
 	auth.SetTokenCookies(c, pair, s.snapConfig().Auth.SecureCookie)
 	c.JSON(http.StatusOK, gin.H{"message": "paired"})
 }
@@ -2710,6 +2707,10 @@ func (s *Server) handleDownloadModel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"filename": filename, "path": path, "status": "installed"})
 }
 
+// maxModelBytes caps the size of uploaded ONNX model files (2 GiB).
+// Models larger than this are rejected to prevent disk exhaustion.
+const maxModelBytes = 2 << 30
+
 // handleUploadModel accepts a multipart ONNX file upload.
 // POST /api/v1/models/upload  (multipart/form-data, field "file")
 func (s *Server) handleUploadModel(c *gin.Context) {
@@ -2747,7 +2748,7 @@ func (s *Server) handleUploadModel(c *gin.Context) {
 		return
 	}
 
-	written, err := io.Copy(f, file)
+	written, err := io.Copy(f, io.LimitReader(file, maxModelBytes+1))
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
@@ -2755,6 +2756,11 @@ func (s *Server) handleUploadModel(c *gin.Context) {
 		os.Remove(tmp)
 		s.logger.Error("models: write failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write model file"})
+		return
+	}
+	if written > maxModelBytes {
+		os.Remove(tmp)
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "model file exceeds 2 GiB limit"})
 		return
 	}
 

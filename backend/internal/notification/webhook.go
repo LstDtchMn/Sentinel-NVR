@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -74,10 +75,12 @@ func (w *WebhookSender) Send(ctx context.Context, token string, notif Notificati
 	if err != nil {
 		return fmt.Errorf("webhook: POST to %q: %w", token, err)
 	}
-	defer resp.Body.Close()
+	// Always drain and close the body to allow HTTP keep-alive connection reuse.
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook: %q returned HTTP %d", token, resp.StatusCode)
+		return fmt.Errorf("webhook: %q returned HTTP %d: %s", token, resp.StatusCode, b)
 	}
 	return nil
 }

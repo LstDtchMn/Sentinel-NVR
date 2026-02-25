@@ -56,6 +56,10 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
   }
 
   Future<void> _enterFocusMode(CameraDetail cam) async {
+    // Capture context-dependent objects synchronously before any awaits.
+    // After an await the widget may have been disposed, making context.read() unsafe.
+    final api = context.read<ApiClient>();
+
     // Dispose any active WebRTC session before starting a new one.
     // Without this, tapping a different camera tile while already in Focus Mode
     // would leak the old peer connection and WS subscription.
@@ -68,7 +72,6 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
       await oldSvc.dispose();
     }
 
-    final api = context.read<ApiClient>();
     final svc = WebRtcService();
     await svc.initialize();
 

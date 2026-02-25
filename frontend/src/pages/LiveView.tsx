@@ -76,6 +76,14 @@ export default function LiveView() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // Auto-clear focus when the focused camera is deleted or disabled so the user
+  // is not left with a blank screen and no recovery path.
+  useEffect(() => {
+    if (focusedCamera && displayCameras && !displayCameras.find((c) => c.name === focusedCamera)) {
+      setFocusedCamera(null);
+    }
+  }, [focusedCamera, displayCameras]);
+
   // Show all enabled cameras — VideoPlayer handles connection errors gracefully.
   // Cameras in error/idle state get a placeholder tile so users see them.
   const displayCameras = cameras?.filter((cam) => cam.enabled);

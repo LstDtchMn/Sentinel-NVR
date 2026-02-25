@@ -825,6 +825,7 @@ class ApiClient {
   ): Promise<RetentionRule> {
     return this.request<RetentionRule>("/retention/rules", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal,
     });
@@ -838,6 +839,7 @@ class ApiClient {
   ): Promise<RetentionRule> {
     return this.request<RetentionRule>(`/retention/rules/${id}`, {
       method: "PUT",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events_days }),
       signal,
     });

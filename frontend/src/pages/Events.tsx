@@ -97,6 +97,9 @@ export default function Events() {
       api
         .getEvents(params, signal)
         .then(({ events: rows, total: t }) => {
+          // Guard: if the signal was aborted (e.g. a newer filter-change request
+          // already started), do not update state — the newer request owns loading.
+          if (signal.aborted) return;
           if (append) {
             setEvents((prev) => [...prev, ...rows]);
           } else {
