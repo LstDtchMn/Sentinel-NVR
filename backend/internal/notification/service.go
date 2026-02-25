@@ -314,7 +314,7 @@ func buildNotification(event eventbus.Event) Notification {
 	}
 
 	// Build deep link for mobile app (R9). Events with a persisted ID can be
-	// opened directly; other event types link to the events list.
+	// opened directly; others carry no deep link (empty string).
 	var deepLink string
 	if event.EventID != 0 {
 		deepLink = fmt.Sprintf("/events/%d", event.EventID)

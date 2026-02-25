@@ -1585,16 +1585,19 @@ func validateWebhookURL(rawURL string) error {
 		}
 	} else {
 		// Hostname — resolve and check all returned addresses to mitigate DNS rebinding.
+		// Reject on DNS lookup failure: allowing an unresolvable domain at registration
+		// time opens a gap where the domain is later configured to point at an internal
+		// address (e.g. the Docker bridge IP of go2rtc) before delivery is attempted.
 		addrs, lookupErr := net.LookupHost(hostname)
-		if lookupErr == nil {
-			for _, addr := range addrs {
-				resolved := net.ParseIP(addr)
-				if resolved != nil && (resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast()) {
-					return fmt.Errorf("webhook URL resolves to a private or loopback address")
-				}
+		if lookupErr != nil {
+			return fmt.Errorf("webhook URL: could not resolve hostname %q: %w", hostname, lookupErr)
+		}
+		for _, addr := range addrs {
+			resolved := net.ParseIP(addr)
+			if resolved != nil && (resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast()) {
+				return fmt.Errorf("webhook URL resolves to a private or loopback address")
 			}
 		}
-		// If DNS lookup fails, allow the URL — the webhook delivery will fail gracefully.
 	}
 	return nil
 }
