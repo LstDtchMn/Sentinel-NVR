@@ -93,6 +93,10 @@ func (a *APNsSender) Send(ctx context.Context, token string, notif Notification)
 	if notif.DeepLink != "" {
 		payload["deep_link"] = notif.DeepLink
 	}
+	if notif.EventID != 0 {
+		payload["event_id"] = fmt.Sprintf("%d", notif.EventID)
+		payload["thumbnail_url"] = fmt.Sprintf("/api/v1/events/%d/thumbnail", notif.EventID)
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {

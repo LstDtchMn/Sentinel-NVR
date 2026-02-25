@@ -107,12 +107,7 @@ func (f *FCMSender) Send(ctx context.Context, token string, notif Notification) 
 				"title": notif.Title,
 				"body":  notif.Body,
 			},
-			"data": map[string]string{
-				"event_type":  notif.EventType,
-				"camera_name": notif.CameraName,
-				"deep_link":   notif.DeepLink,
-				"event_id":    fmt.Sprintf("%d", notif.EventID),
-			},
+			"data": buildFCMData(notif),
 			// Android high-priority channel for near-instant delivery.
 			"android": map[string]any{
 				"priority": "HIGH",
@@ -244,4 +239,20 @@ func buildAPSPayload(title, body string, critical bool) map[string]any {
 		aps["sound"] = "default"
 	}
 	return aps
+}
+
+// buildFCMData constructs the data payload for FCM messages. Includes a
+// thumbnail_url when an event ID is present so the mobile app can fetch the
+// snapshot via the authenticated /events/:id/thumbnail endpoint.
+func buildFCMData(notif Notification) map[string]string {
+	d := map[string]string{
+		"event_type":  notif.EventType,
+		"camera_name": notif.CameraName,
+		"deep_link":   notif.DeepLink,
+		"event_id":    fmt.Sprintf("%d", notif.EventID),
+	}
+	if notif.EventID != 0 {
+		d["thumbnail_url"] = fmt.Sprintf("/api/v1/events/%d/thumbnail", notif.EventID)
+	}
+	return d
 }

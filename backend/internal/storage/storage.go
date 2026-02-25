@@ -140,7 +140,11 @@ func (m *Manager) runMigrator(ctx context.Context) {
 
 	m.runMigratorOnce(ctx)
 
-	ticker := time.NewTicker(time.Duration(m.cfg.MigrationIntervalHours) * time.Hour)
+	interval := time.Duration(m.cfg.MigrationIntervalHours) * time.Hour
+	if interval <= 0 {
+		interval = 6 * time.Hour // safe default — prevent NewTicker(0) panic
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -267,7 +271,11 @@ func (m *Manager) runCleaner(ctx context.Context) {
 
 	m.runCleanerOnce(ctx)
 
-	ticker := time.NewTicker(time.Duration(m.cfg.CleanupIntervalHours) * time.Hour)
+	interval := time.Duration(m.cfg.CleanupIntervalHours) * time.Hour
+	if interval <= 0 {
+		interval = 6 * time.Hour // safe default — prevent NewTicker(0) panic
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -415,7 +423,11 @@ func (m *Manager) runEventCleaner(ctx context.Context) {
 
 	m.runEventCleanerOnce(ctx)
 
-	ticker := time.NewTicker(time.Duration(m.cfg.CleanupIntervalHours) * time.Hour)
+	interval := time.Duration(m.cfg.CleanupIntervalHours) * time.Hour
+	if interval <= 0 {
+		interval = 6 * time.Hour // safe default — prevent NewTicker(0) panic
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

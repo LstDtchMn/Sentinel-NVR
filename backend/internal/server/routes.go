@@ -1232,6 +1232,9 @@ func (s *Server) handleListEvents(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
+	for i := range events {
+		sanitizeEventThumbnail(&events[i])
+	}
 	c.JSON(http.StatusOK, gin.H{"events": events, "total": total})
 }
 
@@ -1256,7 +1259,16 @@ func (s *Server) handleGetEvent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
+	sanitizeEventThumbnail(ev)
 	c.JSON(http.StatusOK, ev)
+}
+
+// sanitizeEventThumbnail replaces the raw filesystem thumbnail path with a
+// relative API URL so the server's directory layout is never exposed to clients.
+func sanitizeEventThumbnail(ev *detection.EventRecord) {
+	if ev.Thumbnail != "" {
+		ev.Thumbnail = fmt.Sprintf("/api/v1/events/%d/thumbnail", ev.ID)
+	}
 }
 
 // handleEventThumbnail serves the JPEG snapshot for a detection event.

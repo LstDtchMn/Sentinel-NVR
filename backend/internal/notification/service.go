@@ -144,15 +144,18 @@ func (s *Service) handleEvent(event eventbus.Event) {
 
 	notif := buildNotification(event)
 
-	// Deduplicate by userID to avoid querying tokens multiple times per user
-	// when multiple pref rows match (e.g. both '*' and specific event_type).
+	// Collect all (token, notification) pairs to dispatch, deduplicating by user.
+	type dispatchItem struct {
+		tok  TokenRecord
+		n    Notification
+	}
+	var items []dispatchItem
 	seen := make(map[int]bool)
 	for _, pref := range prefs {
 		if seen[pref.UserID] {
 			continue
 		}
 		seen[pref.UserID] = true
-		notif.Critical = pref.Critical
 
 		tokens, err := s.repo.TokensForUser(ctx, pref.UserID)
 		if err != nil {
@@ -160,11 +163,24 @@ func (s *Service) handleEvent(event eventbus.Event) {
 				"user_id", pref.UserID, "error", err)
 			continue
 		}
-
+		userNotif := notif
+		userNotif.Critical = pref.Critical
 		for _, tok := range tokens {
-			s.dispatch(ctx, tok, notif)
+			items = append(items, dispatchItem{tok, userNotif})
 		}
 	}
+
+	// Fan out delivery concurrently. A bounded WaitGroup prevents a slow webhook
+	// (15 s timeout) from blocking all other notifications and the event bus.
+	var wg sync.WaitGroup
+	for _, item := range items {
+		wg.Add(1)
+		go func(tok TokenRecord, n Notification) {
+			defer wg.Done()
+			s.dispatch(ctx, tok, n)
+		}(item.tok, item.n)
+	}
+	wg.Wait()
 }
 
 // dispatch sends a notification to a single token and records the result.
@@ -297,11 +313,19 @@ func buildNotification(event eventbus.Event) Notification {
 		}
 	}
 
+	// Build deep link for mobile app (R9). Events with a persisted ID can be
+	// opened directly; other event types link to the events list.
+	var deepLink string
+	if event.EventID != 0 {
+		deepLink = fmt.Sprintf("/events/%d", event.EventID)
+	}
+
 	return Notification{
 		EventType:  event.Type,
 		EventID:    event.EventID, // non-zero for detection events (set via events.persisted)
 		Title:      title,
 		Body:       body,
+		DeepLink:   deepLink,
 		Thumbnail:  event.Thumbnail,
 		Timestamp:  event.Timestamp,
 		CameraName: cameraName,

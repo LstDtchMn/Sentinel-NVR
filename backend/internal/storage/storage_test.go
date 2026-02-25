@@ -41,6 +41,7 @@ func insertTestCamera(t *testing.T, database *sql.DB, name string) int {
 }
 
 // insertTestRecording creates a dummy file on disk and inserts a recordings row.
+// end_time is set to startTime + 10 min so ListOlderThan (which requires end_time IS NOT NULL) finds it.
 func insertTestRecording(t *testing.T, database *sql.DB, camID int, camName, path string, startTime time.Time) int {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -49,11 +50,14 @@ func insertTestRecording(t *testing.T, database *sql.DB, camID int, camName, pat
 	if err := os.WriteFile(path, []byte("dummy mp4"), 0o644); err != nil {
 		t.Fatalf("write dummy file: %v", err)
 	}
+	endTime := startTime.Add(10 * time.Minute)
 	var id int
 	err := database.QueryRow(
-		`INSERT INTO recordings (camera_id, camera_name, path, start_time, duration_s, size_bytes)
-		 VALUES (?, ?, ?, ?, 600, 1024) RETURNING id`,
-		camID, camName, path, startTime.UTC().Format("2006-01-02T15:04:05Z"),
+		`INSERT INTO recordings (camera_id, camera_name, path, start_time, end_time, duration_s, size_bytes)
+		 VALUES (?, ?, ?, ?, ?, 600, 1024) RETURNING id`,
+		camID, camName, path,
+		startTime.UTC().Format("2006-01-02T15:04:05Z"),
+		endTime.UTC().Format("2006-01-02T15:04:05Z"),
 	).Scan(&id)
 	if err != nil {
 		t.Fatalf("insertTestRecording: %v", err)
@@ -464,14 +468,16 @@ func TestCleaner_MissingFileIsOK(t *testing.T) {
 	cold := t.TempDir()
 	expiredTime := time.Now().UTC().AddDate(0, 0, -40)
 
-	// Insert DB row pointing to a nonexistent file
+	// Insert DB row pointing to a nonexistent file (end_time required for ListOlderThan)
 	nonexistentPath := filepath.Join(cold, "already-gone.mp4")
+	endTime := expiredTime.Add(10 * time.Minute)
 	var recID int
 	err := database.QueryRow(
-		`INSERT INTO recordings (camera_id, camera_name, path, start_time, duration_s, size_bytes)
-		 VALUES (?, ?, ?, ?, 600, 1024) RETURNING id`,
+		`INSERT INTO recordings (camera_id, camera_name, path, start_time, end_time, duration_s, size_bytes)
+		 VALUES (?, ?, ?, ?, ?, 600, 1024) RETURNING id`,
 		camID, "front-porch", nonexistentPath,
 		expiredTime.UTC().Format("2006-01-02T15:04:05Z"),
+		endTime.UTC().Format("2006-01-02T15:04:05Z"),
 	).Scan(&recID)
 	if err != nil {
 		t.Fatalf("inserting orphan recording row: %v", err)

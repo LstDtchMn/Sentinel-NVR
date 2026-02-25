@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import 'models/event.dart';
 import 'screens/events.dart';
 import 'screens/live_view.dart';
 import 'screens/login.dart';
@@ -13,6 +14,7 @@ import 'screens/qr_scan.dart';
 import 'screens/settings.dart';
 import 'screens/setup.dart';
 import 'screens/timeline.dart';
+import 'services/api_client.dart';
 import 'services/auth_service.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -22,18 +24,22 @@ GoRouter buildRouter(AuthService auth) {
     navigatorKey: rootNavigatorKey,
     refreshListenable: auth, // re-evaluate redirect on every notifyListeners()
     initialLocation: '/live',
+    // Redirect guard — state machine with four ordered rules:
+    //   1. isLoading → null (stay put; auth state is still initialising)
+    //   2. needsSetup → /setup (first-run: no users exist yet)
+    //   3. !isLoggedIn && non-auth route → /login (unauthenticated → login)
+    //   4. isLoggedIn && auth route → /live (already logged in → main app)
+    // Falls through to null (no redirect) when none of the above apply.
     redirect: (context, state) {
       final isLoggedIn = auth.isAuthenticated;
       final isLoading = auth.isLoading;
       final loc = state.matchedLocation;
       final isAuthRoute = loc == '/login' || loc == '/setup' || loc == '/qr-scan';
 
-      // While initializing, stay put.
-      if (isLoading) return null;
-
-      if (auth.needsSetup && loc != '/setup') return '/setup';
-      if (!isLoggedIn && !isAuthRoute) return '/login';
-      if (isLoggedIn && isAuthRoute) return '/live';
+      if (isLoading) return null;                              // 1. still initialising
+      if (auth.needsSetup && loc != '/setup') return '/setup'; // 2. first-run setup
+      if (!isLoggedIn && !isAuthRoute) return '/login';        // 3. unauthenticated
+      if (isLoggedIn && isAuthRoute) return '/live';           // 4. already logged in
       return null;
     },
     routes: [
@@ -186,7 +192,8 @@ class _ScaffoldWithNav extends StatelessWidget {
   }
 }
 
-/// Minimal event detail screen accessible via deep link /events/:id (R9).
+/// Event detail screen accessible via deep link /events/:id (R9).
+/// Fetches the event from the API and displays thumbnail, metadata, and clip.
 class _EventDetailScreen extends StatefulWidget {
   final int eventId;
 
@@ -197,17 +204,92 @@ class _EventDetailScreen extends StatefulWidget {
 }
 
 class _EventDetailScreenState extends State<_EventDetailScreen> {
+  EventRecord? _event;
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadEvent();
+  }
+
+  Future<void> _loadEvent() async {
+    try {
+      final api = context.read<ApiClient>();
+      final ev = await api.getEvent(widget.eventId);
+      if (!mounted) return;
+      setState(() { _event = ev; _loading = false; });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    // The event detail view is accessed via notification deep link.
-    // Full implementation beyond showing ID is deferred to a future iteration.
     return Scaffold(
       appBar: AppBar(title: Text('Event #${widget.eventId}')),
-      body: Center(
-        child: Text(
-          'Event ${widget.eventId}',
-          style: const TextStyle(color: Colors.grey),
-        ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(child: Text(_error!, style: const TextStyle(color: Colors.red)))
+              : _buildDetail(),
+    );
+  }
+
+  Widget _buildDetail() {
+    final ev = _event!;
+    final api = context.read<ApiClient>();
+    final localTime = DateTime.tryParse(ev.startTime)?.toLocal();
+    final timeStr = localTime != null
+        ? '${localTime.year}-${localTime.month.toString().padLeft(2, '0')}-${localTime.day.toString().padLeft(2, '0')} '
+          '${localTime.hour.toString().padLeft(2, '0')}:${localTime.minute.toString().padLeft(2, '0')}:${localTime.second.toString().padLeft(2, '0')}'
+        : ev.startTime;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Thumbnail
+          if (ev.thumbnail.isNotEmpty)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.network(
+                api.eventThumbnailUrl(ev.id),
+                width: double.infinity,
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) => Container(
+                  height: 200,
+                  color: Colors.grey[800],
+                  child: const Center(child: Icon(Icons.broken_image, color: Colors.grey)),
+                ),
+              ),
+            ),
+          const SizedBox(height: 16),
+          // Type + label
+          Text(
+            ev.label.isNotEmpty ? ev.label : ev.type,
+            style: Theme.of(context).textTheme.headlineSmall,
+          ),
+          const SizedBox(height: 8),
+          // Confidence
+          if (ev.confidence > 0)
+            Text('Confidence: ${(ev.confidence * 100).toStringAsFixed(0)}%',
+                style: TextStyle(color: Colors.grey[400])),
+          const SizedBox(height: 4),
+          // Time
+          Text(timeStr, style: TextStyle(color: Colors.grey[400])),
+          const SizedBox(height: 4),
+          // Clip indicator
+          if (ev.hasClip)
+            Chip(
+              label: const Text('Has clip'),
+              avatar: const Icon(Icons.videocam, size: 16),
+              backgroundColor: Colors.blue[800],
+            ),
+        ],
       ),
     );
   }

@@ -43,6 +43,9 @@ type webhookPayload struct {
 }
 
 // Send POSTs a JSON payload to the webhook URL (token).
+// The payload includes all notification fields (event_id, event_type, title, body,
+// camera_name, deep_link, critical, timestamp). Returns an error for any non-2xx
+// response — 3xx redirects are blocked by CheckRedirect (SSRF prevention).
 func (w *WebhookSender) Send(ctx context.Context, token string, notif Notification) error {
 	payload := webhookPayload{
 		EventID:    notif.EventID,
