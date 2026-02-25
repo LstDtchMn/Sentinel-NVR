@@ -132,7 +132,7 @@ describe("formatWallClock", () => {
 
   it("handles hour wrap-around correctly", () => {
     const ref = new Date();
-    ref.setHours(23, 58, 00, 0);
+    ref.setHours(23, 58, 0, 0);
     // 2 minutes later = 00:00:00 next day — formatWallClock only formats
     // local hour/minute/second so it wraps to 00:00:00
     expect(formatWallClock(ref.toISOString(), 120)).toBe("00:00:00");
