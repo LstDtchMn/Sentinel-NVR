@@ -17,9 +17,16 @@ type WebhookSender struct {
 }
 
 // NewWebhookSender creates a WebhookSender with a 15-second HTTP timeout.
+// Redirects are never followed: an attacker-controlled endpoint could redirect
+// to an internal/private target (SSRF). Any non-2xx response is treated as an error.
 func NewWebhookSender() *WebhookSender {
 	return &WebhookSender{
-		client: &http.Client{Timeout: 15 * time.Second},
+		client: &http.Client{
+			Timeout: 15 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 

@@ -198,7 +198,7 @@ func TestManagerStart_CreatesDirs(t *testing.T) {
 		SegmentDuration:   10,
 	}
 	recRepo := recording.NewRepository(openTestDB(t))
-	mgr := NewManager(cfg, recRepo, slog.Default())
+	mgr := NewManager(cfg, recRepo, nil, nil, slog.Default())
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start(): %v", err)

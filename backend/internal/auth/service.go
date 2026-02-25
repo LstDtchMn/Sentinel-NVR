@@ -86,8 +86,10 @@ func (s *Service) Login(ctx context.Context, username, password string) (*TokenP
 
 // Refresh validates the refresh token, rotates it (issues a new pair, deletes the old one),
 // and returns the new token pair. Rotation invalidates stolen tokens immediately.
+// ClaimRefreshToken is used to atomically delete-and-read, preventing concurrent
+// requests from replaying the same token to mint multiple sessions.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair, error) {
-	rt, err := s.repo.GetRefreshToken(ctx, refreshToken)
+	rt, err := s.repo.ClaimRefreshToken(ctx, refreshToken)
 	if err != nil {
 		return nil, err // ErrNotFound or ErrTokenExpired
 	}
@@ -95,13 +97,6 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 	if err != nil {
 		return nil, fmt.Errorf("refresh: loading user: %w", err)
 	}
-
-	// Delete the old token before issuing new ones — ensures a stolen token
-	// cannot be replayed after the legitimate user has refreshed.
-	if err := s.repo.DeleteRefreshToken(ctx, refreshToken); err != nil {
-		return nil, fmt.Errorf("refresh: revoking old token: %w", err)
-	}
-
 	return s.issueTokenPair(ctx, user)
 }
 

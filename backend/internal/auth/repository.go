@@ -149,6 +149,36 @@ func (r *Repository) GetRefreshToken(ctx context.Context, token string) (*Refres
 	return &rt, nil
 }
 
+// ClaimRefreshToken atomically deletes and returns a refresh token in one
+// statement (DELETE ... RETURNING). Because the DELETE is atomic, two concurrent
+// refresh requests racing on the same token will see at most one succeed; the
+// second gets sql.ErrNoRows → ErrNotFound, preventing duplicate session minting.
+// Returns ErrNotFound if the token does not exist, ErrTokenExpired if expired.
+func (r *Repository) ClaimRefreshToken(ctx context.Context, token string) (*RefreshToken, error) {
+	var rt RefreshToken
+	var expiresStr, createdStr string
+	err := r.db.QueryRowContext(ctx,
+		`DELETE FROM refresh_tokens WHERE token = ?
+		 RETURNING id, user_id, token, expires_at, created_at`, token,
+	).Scan(&rt.ID, &rt.UserID, &rt.Token, &expiresStr, &createdStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claiming refresh token: %w", err)
+	}
+	expiresAt, err := dbutil.ParseSQLiteTime(expiresStr)
+	if err != nil {
+		return nil, fmt.Errorf("claiming refresh token: parsing expires_at %q: %w", expiresStr, err)
+	}
+	rt.ExpiresAt = expiresAt
+	rt.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
+	if time.Now().After(rt.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+	return &rt, nil
+}
+
 // DeleteRefreshToken removes a refresh token (logout).
 func (r *Repository) DeleteRefreshToken(ctx context.Context, token string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE token = ?`, token)

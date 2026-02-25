@@ -32,8 +32,10 @@ const (
 // preventing a potential import cycle. detection.Repository satisfies this interface.
 type EventDeleter interface {
 	// DeleteOlderThan deletes up to limit events older than cutoff matching the
-	// given camera and type filters (nil/empty = wildcard). Returns rows deleted.
-	DeleteOlderThan(ctx context.Context, cameraID *int, eventType string, cutoff time.Time, limit int) (int, error)
+	// given camera and type filters (nil/empty = wildcard). excludeCameraIDs lists
+	// camera IDs to skip (used by the global fallback to honour per-camera rules).
+	// Returns rows deleted.
+	DeleteOlderThan(ctx context.Context, cameraID *int, eventType string, cutoff time.Time, limit int, excludeCameraIDs ...int) (int, error)
 }
 
 // Manager orchestrates hot/cold storage directories and retention cleanup (R13, R14).
@@ -537,9 +539,17 @@ func (m *Manager) runEventCleanerOnce(ctx context.Context) {
 		}
 	}
 
+	// Build per-event-type sets of camera IDs that were handled by camera-specific
+	// rules above. The global fallback must exclude these cameras so a shorter global
+	// rule cannot override a longer camera-specific rule.
+	coveredCamsForType := make(map[string][]int, len(KnownEventTypes))
+	for k := range covered {
+		coveredCamsForType[k.evType] = append(coveredCamsForType[k.evType], k.camID)
+	}
+
 	// Global fallback pass: apply effective retention to every known type for
 	// any (camera, type) pair not yet handled by a camera-specific rule above.
-	// Uses nil cameraID so the query matches all cameras at once.
+	// Excludes cameras that already have a specific rule for the type.
 	globalDays := m.cfg.ColdRetentionDays // default: use cold retention as event TTL
 	for _, evType := range KnownEventTypes {
 		days := effectiveDays(-1, evType)
@@ -547,15 +557,14 @@ func (m *Manager) runEventCleanerOnce(ctx context.Context) {
 			days = globalDays
 		}
 		cutoff := time.Now().AddDate(0, 0, -days)
+		excludeIDs := coveredCamsForType[evType]
 		deleted := 0
 		for {
 			if ctx.Err() != nil {
 				return
 			}
 			dCtx, dCancel := context.WithTimeout(ctx, dbTimeout)
-			// Pass nil cameraID to match all cameras; events already deleted by
-			// camera-specific rules above won't appear again (already gone from DB).
-			n, err := m.eventDeleter.DeleteOlderThan(dCtx, nil, evType, cutoff, batchSize)
+			n, err := m.eventDeleter.DeleteOlderThan(dCtx, nil, evType, cutoff, batchSize, excludeIDs...)
 			dCancel()
 			if err != nil {
 				m.logger.Warn("event cleaner: global delete failed",

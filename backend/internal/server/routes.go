@@ -2496,6 +2496,9 @@ func (s *Server) handleListRetentionRules(c *gin.Context) {
 // Body: {"camera_id": 1, "event_type": "detection", "events_days": 30}
 // camera_id and event_type are optional; omit for wildcard rules.
 func (s *Server) handleCreateRetentionRule(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	var req struct {
 		CameraID   *int    `json:"camera_id"`
 		EventType  *string `json:"event_type"`
@@ -2540,6 +2543,9 @@ func (s *Server) handleCreateRetentionRule(c *gin.Context) {
 // PUT /api/v1/retention/rules/:id
 // Body: {"events_days": 60}
 func (s *Server) handleUpdateRetentionRule(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule id"})
@@ -2574,6 +2580,9 @@ func (s *Server) handleUpdateRetentionRule(c *gin.Context) {
 // handleDeleteRetentionRule deletes a retention rule by ID.
 // DELETE /api/v1/retention/rules/:id
 func (s *Server) handleDeleteRetentionRule(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule id"})
@@ -2660,6 +2669,9 @@ func (s *Server) handleListModels(c *gin.Context) {
 // handleDownloadModel triggers download of a curated model from the manifest.
 // POST /api/v1/models/:filename/download
 func (s *Server) handleDownloadModel(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	filename := c.Param("filename")
 
 	// Find the model in the curated manifest.
@@ -2689,6 +2701,9 @@ func (s *Server) handleDownloadModel(c *gin.Context) {
 // handleUploadModel accepts a multipart ONNX file upload.
 // POST /api/v1/models/upload  (multipart/form-data, field "file")
 func (s *Server) handleUploadModel(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing 'file' field: " + err.Error()})
@@ -2745,6 +2760,9 @@ func (s *Server) handleUploadModel(c *gin.Context) {
 // handleDeleteModel removes a locally installed model file.
 // DELETE /api/v1/models/:filename
 func (s *Server) handleDeleteModel(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	filename := filepath.Base(c.Param("filename"))
 	if filepath.Ext(filename) != ".onnx" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid model filename"})

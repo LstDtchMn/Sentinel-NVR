@@ -138,10 +138,11 @@ func (r *Repository) Delete(ctx context.Context, id int) error {
 
 // DeleteOlderThan bulk-deletes events older than cutoff that match the given
 // camera and event-type filters. Pass cameraID=nil to match all cameras;
-// pass eventType="" to match all event types. Returns the number of rows deleted.
-// Thumbnails for deleted events are also removed from disk.
-// Processes at most limit rows per call — iterate until 0 is returned to drain.
-func (r *Repository) DeleteOlderThan(ctx context.Context, cameraID *int, eventType string, cutoff time.Time, limit int) (int, error) {
+// pass eventType="" to match all event types. excludeCameraIDs lists camera IDs
+// to skip (used by the global retention fallback to honour per-camera rules).
+// Returns the number of rows deleted. Thumbnails for deleted events are also
+// removed from disk. Processes at most limit rows per call — iterate until 0.
+func (r *Repository) DeleteOlderThan(ctx context.Context, cameraID *int, eventType string, cutoff time.Time, limit int, excludeCameraIDs ...int) (int, error) {
 	// Fetch IDs and thumbnail paths in one query, then delete — two-phase approach
 	// avoids holding a write lock for the file I/O.
 	where := " WHERE start_time < ?"
@@ -149,6 +150,14 @@ func (r *Repository) DeleteOlderThan(ctx context.Context, cameraID *int, eventTy
 	if cameraID != nil {
 		where += " AND camera_id = ?"
 		args = append(args, *cameraID)
+	}
+	if len(excludeCameraIDs) > 0 {
+		placeholders := make([]string, len(excludeCameraIDs))
+		for i, id := range excludeCameraIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		where += " AND (camera_id IS NULL OR camera_id NOT IN (" + strings.Join(placeholders, ",") + "))"
 	}
 	if eventType != "" {
 		where += " AND type = ?"
