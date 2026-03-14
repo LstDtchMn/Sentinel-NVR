@@ -12,6 +12,26 @@ interface Props {
   onDelete: (id: number) => void;
 }
 
+function eventTypeBadge(type: string): { bg: string; text: string; label: string } {
+  const label = type.replace(/[._]/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  switch (type) {
+    case "detection":
+      return { bg: "bg-blue-500/20", text: "text-blue-400", label };
+    case "face_match":
+      return { bg: "bg-purple-500/20", text: "text-purple-400", label };
+    case "audio_detection":
+      return { bg: "bg-amber-500/20", text: "text-amber-400", label };
+    case "camera.connected":
+    case "camera.disconnected":
+      return { bg: "bg-orange-500/20", text: "text-orange-400", label };
+    case "recording.started":
+    case "recording.stopped":
+      return { bg: "bg-green-500/20", text: "text-green-400", label };
+    default:
+      return { bg: "bg-gray-500/20", text: "text-gray-400", label };
+  }
+}
+
 function confidenceColor(c: number): string {
   if (c >= 0.8) return "bg-green-500/20 text-green-400";
   if (c >= 0.5) return "bg-yellow-500/20 text-yellow-400";
@@ -81,6 +101,15 @@ export default function EventCard({ event, onDelete }: Props) {
 
       {/* Details */}
       <div className="p-3 flex flex-col gap-1.5 flex-1">
+        {/* Event type badge */}
+        {(() => {
+          const badge = eventTypeBadge(event.type);
+          return (
+            <span className={`inline-flex self-start text-[10px] font-medium px-1.5 py-0.5 rounded ${badge.bg} ${badge.text}`}>
+              {badge.label}
+            </span>
+          );
+        })()}
         {/* Type + Label row */}
         <div className="flex items-center gap-2 flex-wrap">
           {event.type === "detection" ? (

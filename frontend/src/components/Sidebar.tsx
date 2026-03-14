@@ -90,7 +90,7 @@ export default function Sidebar() {
           <div className="px-4 py-3 flex items-center justify-between">
             <span className="text-xs text-muted truncate max-w-[120px]" title={user.username}>
               {user.username}
-              {user.role === "admin" && (
+              {user.role === "admin" && user.role !== user.username && (
                 <span className="ml-1.5 text-[10px] text-sentinel-500 font-medium">admin</span>
               )}
             </span>

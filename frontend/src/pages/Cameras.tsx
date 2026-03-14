@@ -180,7 +180,7 @@ function CameraCard({
   return (
     <div className="bg-surface-raised border border-border rounded-lg p-5">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-medium truncate mr-2">{camera.name}</h3>
+        <h3 className="font-medium break-words mr-2">{camera.name}</h3>
         <div className="flex items-center gap-2">
           <StatusBadge status={state} />
           <button

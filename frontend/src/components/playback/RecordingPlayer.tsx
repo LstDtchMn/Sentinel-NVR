@@ -24,6 +24,8 @@ interface RecordingPlayerProps {
   onSegmentChange: (segment: TimelineSegment) => void;
   onPlaybackRateChange: (rate: number) => void;
   className?: string;
+  /** Override the empty-state message shown when no segment is loaded. */
+  emptyMessage?: string;
 }
 
 /** Imperative API exposed via ref so Playback.tsx can seek on timeline click (R6). */
@@ -45,6 +47,7 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
       onSegmentChange,
       onPlaybackRateChange,
       className = "",
+      emptyMessage,
     }: RecordingPlayerProps,
     ref,
   ) {
@@ -245,7 +248,7 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
         {!segment && (
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             <Film className="w-12 h-12 text-faint mb-3" />
-            <span className="text-muted text-sm">Select a camera and date to start playback</span>
+            <span className="text-muted text-sm">{emptyMessage ?? "Select a camera and date to start playback"}</span>
           </div>
         )}
       </div>

@@ -18,6 +18,24 @@ const STAT_COLOR_MAP: Record<StatColor, string> = {
   cyan: "text-status-highlight",
 };
 
+/** Convert Go duration string (e.g. "121h33m56s") to human-friendly "5d 1h 33m". */
+function formatUptime(raw: string): string {
+  const h = raw.match(/(\d+)h/);
+  const m = raw.match(/(\d+)m/);
+  const s = raw.match(/(\d+)s/);
+  const hours = h ? parseInt(h[1], 10) : 0;
+  const mins = m ? parseInt(m[1], 10) : 0;
+  const secs = s ? parseInt(s[1], 10) : 0;
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    const remH = hours % 24;
+    return remH > 0 ? `${days}d ${remH}h ${mins}m` : `${days}d ${mins}m`;
+  }
+  if (hours >= 1) return `${hours}h ${mins}m`;
+  if (mins >= 1) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
 export default function Dashboard() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,7 +95,7 @@ export default function Dashboard() {
           <StatCard
             icon={Cpu}
             label="Uptime"
-            value={health.uptime}
+            value={formatUptime(health.uptime)}
             color="blue"
           />
           <StatCard
