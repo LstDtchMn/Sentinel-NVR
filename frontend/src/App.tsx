@@ -8,6 +8,7 @@
  */
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import Sidebar from "./components/Sidebar";
 import LiveView from "./pages/LiveView";
 import Playback from "./pages/Playback";
@@ -53,7 +54,7 @@ function AppShell() {
     <ProtectedRoute>
       <div className="flex h-screen bg-surface-base text-white">
         <Sidebar />
-        <main className="flex-1 overflow-auto">
+        <main className="flex-1 overflow-auto pt-14 md:pt-0">
           <Routes>
             <Route path="/" element={<Navigate to="/live" replace />} />
             <Route path="/live" element={<LiveView />} />
@@ -78,15 +79,17 @@ function AppShell() {
 
 function App() {
   return (
-    <AuthProvider>
-      <Routes>
-        {/* Public: login and first-run setup (no auth required) */}
-        <Route path="/login" element={<Login />} />
-        <Route path="/setup" element={<Setup />} />
-        {/* All other routes: protected by ProtectedRoute inside AppShell */}
-        <Route path="/*" element={<AppShell />} />
-      </Routes>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <Routes>
+          {/* Public: login and first-run setup (no auth required) */}
+          <Route path="/login" element={<Login />} />
+          <Route path="/setup" element={<Setup />} />
+          {/* All other routes: protected by ProtectedRoute inside AppShell */}
+          <Route path="/*" element={<AppShell />} />
+        </Routes>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 

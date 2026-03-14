@@ -56,6 +56,7 @@ export default function Models() {
       setDownloading(filename);
       setError(null);
       await api.downloadModel(filename);
+      // TODO(review): L1 — loadModels post-mutation lacks AbortController/unmount guard
       await loadModels();
     } catch (err: any) {
       setError(err?.message ?? "Download failed");
@@ -199,6 +200,7 @@ export default function Models() {
               ref={fileInputRef}
               type="file"
               accept=".onnx"
+              aria-label="Choose ONNX model file"
               onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
               className="flex-1 text-sm text-muted file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-surface-overlay file:text-white hover:file:bg-surface-base file:transition-colors file:cursor-pointer"
             />

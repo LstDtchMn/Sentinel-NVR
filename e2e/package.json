@@ -1,0 +1,19 @@
+{
+  "name": "sentinel-nvr-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "test:ui": "npx playwright test --ui",
+    "test:desktop": "npx playwright test --project=desktop",
+    "test:mobile": "npx playwright test --project=mobile",
+    "test:a11y": "npx playwright test accessibility",
+    "report": "npx playwright show-report",
+    "setup": "npx playwright install chromium"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.0",
+    "@playwright/test": "^1.49.0"
+  }
+}

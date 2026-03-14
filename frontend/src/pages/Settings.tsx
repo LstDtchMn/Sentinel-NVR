@@ -160,6 +160,7 @@ export default function Settings() {
     }
   };
 
+  // TODO(review): L2 — retention rule handlers lack AbortController
   const handleAddRetentionRule = async () => {
     if (retentionSubmitting) return;
     if (newRuleDays < 1) {
@@ -441,8 +442,9 @@ export default function Settings() {
           {/* Add new rule */}
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 items-end">
             <div>
-              <label className="block text-xs text-muted mb-1">Camera</label>
+              <label htmlFor="retention-camera" className="block text-xs text-muted mb-1">Camera</label>
               <select
+                id="retention-camera"
                 value={newRuleCameraId}
                 onChange={(e) => setNewRuleCameraId(e.target.value)}
                 className="w-full bg-surface-base border border-border rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-sentinel-500"
@@ -454,8 +456,9 @@ export default function Settings() {
               </select>
             </div>
             <div>
-              <label className="block text-xs text-muted mb-1">Event type</label>
+              <label htmlFor="retention-event-type" className="block text-xs text-muted mb-1">Event type</label>
               <select
+                id="retention-event-type"
                 value={newRuleEventType}
                 onChange={(e) => setNewRuleEventType(e.target.value)}
                 className="w-full bg-surface-base border border-border rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-sentinel-500"
@@ -472,8 +475,9 @@ export default function Settings() {
               </select>
             </div>
             <div>
-              <label className="block text-xs text-muted mb-1">Keep (days)</label>
+              <label htmlFor="retention-days" className="block text-xs text-muted mb-1">Keep (days)</label>
               <input
+                id="retention-days"
                 type="number"
                 min={1}
                 value={newRuleDays}

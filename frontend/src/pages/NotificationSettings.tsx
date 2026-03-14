@@ -145,7 +145,7 @@ export default function NotificationSettings() {
         <h1 className="text-2xl font-semibold">Notification Settings</h1>
       </div>
       <p className="text-muted mb-8">
-        Register device tokens and configure which events trigger push or webhook alerts (R9).
+        Register device tokens and configure which events trigger push or webhook alerts.
       </p>
 
       {error && (
@@ -208,6 +208,7 @@ export default function NotificationSettings() {
                 <select
                   value={newProvider}
                   onChange={(e) => setNewProvider(e.target.value as typeof newProvider)}
+                  aria-label="Token provider"
                   className="col-span-1 bg-surface-base border border-border rounded px-3 py-2 text-sm"
                 >
                   {PROVIDERS.map((p) => (
@@ -220,6 +221,7 @@ export default function NotificationSettings() {
                   value={newToken}
                   onChange={(e) => setNewToken(e.target.value)}
                   required
+                  aria-label="Token value"
                   className="col-span-2 bg-surface-base border border-border rounded px-3 py-2 text-sm placeholder:text-faint"
                 />
               </div>
@@ -228,6 +230,7 @@ export default function NotificationSettings() {
                 placeholder="Label (optional) — e.g. My iPhone"
                 value={newLabel}
                 onChange={(e) => setNewLabel(e.target.value)}
+                aria-label="Token label"
                 className="w-full bg-surface-base border border-border rounded px-3 py-2 text-sm placeholder:text-faint"
               />
               <button
@@ -298,6 +301,7 @@ export default function NotificationSettings() {
               <select
                 value={newEventType}
                 onChange={(e) => setNewEventType(e.target.value)}
+                aria-label="Event type"
                 className="w-full bg-surface-base border border-border rounded px-3 py-2 text-sm"
               >
                 {EVENT_TYPES.map((et) => (
@@ -314,7 +318,7 @@ export default function NotificationSettings() {
                   />
                   Enabled
                 </label>
-                <label className="flex items-center gap-2 text-sm cursor-pointer" title="Bypasses iOS Do Not Disturb (R9)">
+                <label className="flex items-center gap-2 text-sm cursor-pointer" title="Bypasses iOS Do Not Disturb">
                   <input
                     type="checkbox"
                     checked={newCritical}

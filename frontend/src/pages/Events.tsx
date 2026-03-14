@@ -76,6 +76,7 @@ export default function Events() {
         // Prepend to list and bump total.
         setTotal((t) => t + 1);
         setEvents((prev) => [event, ...prev]);
+        offsetRef.current += 1;
       } catch {
         // Ignore unparseable SSE data (e.g. heartbeat comments forwarded by some proxies)
       }
@@ -190,6 +191,7 @@ export default function Events() {
           onChange={(e) =>
             setFilterCamera(e.target.value === "" ? "" : Number(e.target.value))
           }
+          aria-label="Filter by camera"
           className="bg-surface-raised border border-border rounded-lg px-3 py-2 text-sm
                      text-white focus:outline-none focus:ring-1 focus:ring-sentinel-500"
         >
@@ -205,6 +207,7 @@ export default function Events() {
         <select
           value={filterType}
           onChange={(e) => setFilterType(e.target.value)}
+          aria-label="Filter by event type"
           className="bg-surface-raised border border-border rounded-lg px-3 py-2 text-sm
                      text-white focus:outline-none focus:ring-1 focus:ring-sentinel-500"
         >
@@ -220,6 +223,7 @@ export default function Events() {
           type="date"
           value={filterDate}
           onChange={(e) => setFilterDate(e.target.value)}
+          aria-label="Filter by date"
           className="bg-surface-raised border border-border rounded-lg px-3 py-2 text-sm
                      text-white focus:outline-none focus:ring-1 focus:ring-sentinel-500
                      [color-scheme:dark]"

@@ -1,10 +1,11 @@
 /**
- * Sidebar — persistent navigation sidebar (CG11).
+ * Sidebar — responsive navigation sidebar (CG11).
  * Phase 7: shows logged-in username and logout button at the bottom (CG6).
+ * Responsive: collapses to hamburger menu on screens < 768px.
  */
 import { useEffect, useState } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
-import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut, Users, Upload, Box } from "lucide-react";
+import { NavLink, useNavigate, useLocation } from "react-router-dom";
+import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut, Users, Upload, Box, Menu, X } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -23,8 +24,15 @@ const navItems = [
 
 export default function Sidebar() {
   const [version, setVersion] = useState<string>("");
+  const [mobileOpen, setMobileOpen] = useState(false);
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Close mobile menu on navigation
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -40,12 +48,20 @@ export default function Sidebar() {
     navigate("/login", { replace: true });
   }
 
-  return (
-    <aside className="w-64 bg-surface-raised border-r border-border flex flex-col">
+  const sidebarContent = (
+    <>
       {/* Logo */}
       <div className="h-16 flex items-center px-6 border-b border-border">
         <Shield className="w-6 h-6 text-sentinel-500 mr-3" />
         <span className="text-lg font-semibold tracking-tight">Sentinel NVR</span>
+        {/* Close button — mobile only */}
+        <button
+          onClick={() => setMobileOpen(false)}
+          className="ml-auto p-1.5 rounded-md text-muted hover:text-white md:hidden"
+          aria-label="Close menu"
+        >
+          <X className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Navigation */}
@@ -81,6 +97,7 @@ export default function Sidebar() {
             <button
               onClick={handleLogout}
               title="Sign out"
+              aria-label="Sign out"
               className="p-1.5 rounded-md text-muted hover:text-status-error hover:bg-surface-overlay
                          transition-colors"
             >
@@ -92,6 +109,40 @@ export default function Sidebar() {
           Sentinel NVR {version ? `v${version}` : ""}
         </div>
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Mobile hamburger button — fixed top-left */}
+      <button
+        onClick={() => setMobileOpen(true)}
+        className="fixed top-3 left-3 z-50 p-2 rounded-lg bg-surface-raised border border-border
+                   text-muted hover:text-white md:hidden"
+        aria-label="Open menu"
+      >
+        <Menu className="w-5 h-5" />
+      </button>
+
+      {/* Desktop sidebar — hidden on mobile */}
+      <aside className="hidden md:flex w-64 bg-surface-raised border-r border-border flex-col shrink-0">
+        {sidebarContent}
+      </aside>
+
+      {/* Mobile sidebar — overlay */}
+      {mobileOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-40 bg-black/60 md:hidden"
+            onClick={() => setMobileOpen(false)}
+          />
+          {/* Slide-in panel */}
+          <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-surface-raised border-r border-border flex flex-col md:hidden">
+            {sidebarContent}
+          </aside>
+        </>
+      )}
+    </>
   );
 }

@@ -74,6 +74,7 @@ export default function Faces() {
       setEnrollFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
       setEnrollSuccess(true);
+      // TODO(review): L6 — setTimeout handle not stored; not cancelled on unmount
       setTimeout(() => setEnrollSuccess(false), 3_000);
     } catch (err) {
       if (ctrl.signal.aborted) return;
@@ -168,8 +169,9 @@ export default function Faces() {
             <form onSubmit={handlePhotoEnroll} className="space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-muted mb-1">Name</label>
+                  <label htmlFor="face-enroll-name" className="block text-xs text-muted mb-1">Name</label>
                   <input
+                    id="face-enroll-name"
                     type="text"
                     value={enrollName}
                     onChange={(e) => setEnrollName(e.target.value)}
@@ -179,8 +181,9 @@ export default function Faces() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-muted mb-1">Photo (JPEG, max 16 MB)</label>
+                  <label htmlFor="face-photo-upload" className="block text-xs text-muted mb-1">Photo (JPEG, max 16 MB)</label>
                   <input
+                    id="face-photo-upload"
                     ref={fileInputRef}
                     type="file"
                     accept="image/jpeg,image/jpg"

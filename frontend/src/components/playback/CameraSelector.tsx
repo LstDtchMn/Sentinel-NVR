@@ -14,6 +14,7 @@ export default function CameraSelector({ cameras, selected, onSelect }: CameraSe
     <select
       value={selected || ""}
       onChange={(e) => onSelect(e.target.value)}
+      aria-label="Select camera"
       className="bg-surface-base border border-border rounded-lg px-3 py-1.5 text-sm
                  text-white focus:outline-none focus:ring-1 focus:ring-sentinel-500
                  cursor-pointer min-w-[160px]"
