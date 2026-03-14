@@ -129,7 +129,7 @@ export default function LiveView() {
           <p className="text-muted">No cameras to display</p>
           <p className="text-sm text-faint mt-1">
             Add cameras on the{" "}
-            <Link to="/cameras" className="text-sentinel-500 hover:underline">
+            <Link to="/cameras" className="text-sentinel-500 underline">
               Cameras page
             </Link>{" "}
             to see live video here

@@ -13,7 +13,7 @@ const NAV_ITEMS = [
   { name: 'Faces', path: '/faces', heading: /faces/i },
   { name: 'Models', path: '/models', heading: /models/i },
   { name: 'Import', path: '/import', heading: /import/i },
-  { name: 'Notifications', path: '/notifications', heading: /notification/i },
+  { name: 'Notifications', path: '/notifications', heading: /Notification Settings/i },
   { name: 'Settings', path: '/settings', heading: /settings/i },
 ];
 

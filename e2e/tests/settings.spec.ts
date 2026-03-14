@@ -72,7 +72,11 @@ test.describe('Settings Page', () => {
     await expect(page.getByRole('button', { name: 'Generate QR Code' })).toBeVisible();
   });
 
-  test('Save Settings button is visible', async ({ page }) => {
+  test('Save Settings button appears after making a change', async ({ page }) => {
+    // Save button only shows when there are unsaved changes (sticky bar)
+    const hotRetention = page.getByRole('spinbutton').nth(0);
+    await hotRetention.clear();
+    await hotRetention.fill('7');
     await expect(page.getByRole('button', { name: 'Save Settings' })).toBeVisible();
   });
 

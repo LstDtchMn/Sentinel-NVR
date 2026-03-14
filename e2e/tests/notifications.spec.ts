@@ -13,9 +13,9 @@ test.describe('Notification Settings Page', () => {
     await expect(description).toBeVisible();
   });
 
-  test('displays Device Tokens section with empty state', async ({ page }) => {
+  test('displays Notification Channels section with empty state', async ({ page }) => {
     const main = page.locator('main');
-    await expect(main.getByText('Device Tokens').first()).toBeVisible();
+    await expect(main.getByText('Notification Channels').first()).toBeVisible();
     await expect(main.getByText('No tokens registered yet.')).toBeVisible();
   });
 
@@ -23,11 +23,11 @@ test.describe('Notification Settings Page', () => {
     const typeCombobox = page.getByRole('combobox').first();
     await expect(typeCombobox).toHaveValue('webhook');
 
-    await expect(page.getByRole('button', { name: /Register Token/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Add Channel/i })).toBeVisible();
   });
 
-  test('displays Alert Preferences section', async ({ page }) => {
-    await expect(page.getByText('Alert Preferences')).toBeVisible();
+  test('displays Alert Rules section', async ({ page }) => {
+    await expect(page.getByText('Alert Rules')).toBeVisible();
   });
 
   test('Enabled checkbox is checked by default', async ({ page }) => {
@@ -41,7 +41,7 @@ test.describe('Notification Settings Page', () => {
     await expect(criticalCheckbox).toBeVisible();
   });
 
-  test('Save Preference button is visible', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Save Preference' })).toBeVisible();
+  test('Save Rule button is visible', async ({ page }) => {
+    await expect(page.getByRole('button', { name: 'Save Rule' })).toBeVisible();
   });
 });

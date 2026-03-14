@@ -13,7 +13,7 @@ test.describe('accessibility - authenticated pages', () => {
     { path: '/faces', heading: /faces/i },
     { path: '/models', heading: /models/i },
     { path: '/import', heading: /import/i },
-    { path: '/notifications', heading: /notifications/i },
+    { path: '/notifications', heading: /Notification Settings/i },
     { path: '/settings', heading: /settings/i },
   ];
 

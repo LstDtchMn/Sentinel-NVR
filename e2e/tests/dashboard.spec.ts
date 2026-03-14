@@ -13,7 +13,7 @@ test.describe('Dashboard page', () => {
 
   test('all six status labels are visible', async ({ page }) => {
     const main = page.locator('main');
-    const labels = ['Status', 'Uptime', 'Cameras', 'Recordings', 'Database', 'go2rtc'];
+    const labels = ['Status', 'Uptime', 'Cameras', 'Recordings', 'Database', 'Streaming Engine'];
     for (const label of labels) {
       await expect(main.getByText(label, { exact: true })).toBeVisible();
     }
