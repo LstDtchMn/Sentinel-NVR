@@ -273,11 +273,15 @@ export default function Faces() {
           Loading faces...
         </div>
       ) : faces.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted">
-          <UserPlus className="w-12 h-12 opacity-20" />
-          <p>No faces enrolled</p>
-          {!isAdmin && (
-            <p className="text-xs text-faint max-w-md text-center">
+        <div className="flex-1 flex flex-col items-center justify-center gap-3">
+          <UserPlus className="w-12 h-12 text-faint" />
+          <p className="text-muted">No faces enrolled</p>
+          {isAdmin ? (
+            <p className="text-sm text-faint">
+              Use the enrollment form above to add a face from a photo.
+            </p>
+          ) : (
+            <p className="text-sm text-faint max-w-md text-center">
               Ask an admin to enroll faces via the Faces page or POST /api/v1/faces.
             </p>
           )}

@@ -5,6 +5,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api, NotifToken, NotifPref, NotifLogEntry } from "../api/client";
 import { Bell, Plus, Trash2, CheckCircle, XCircle, Clock } from "lucide-react";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 // Known event types that can trigger notifications.
 const EVENT_TYPES = [
@@ -22,6 +24,8 @@ export default function NotificationSettings() {
   const [log, setLog] = useState<NotifLogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Toast feedback
+  const { toast, showToast, dismissToast } = useToast();
 
   // New token form state
   const [newProvider, setNewProvider] = useState<"fcm" | "apns" | "webhook">("webhook");
@@ -87,6 +91,7 @@ export default function NotificationSettings() {
       setTokens((prev) => [...prev, created]);
       setNewToken("");
       setNewLabel("");
+      showToast("Channel registered", "success");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to register token");
     } finally {
@@ -122,6 +127,7 @@ export default function NotificationSettings() {
         }
         return [...prev, result];
       });
+      showToast("Rule saved", "success");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to save preference");
     } finally {
@@ -381,6 +387,7 @@ export default function NotificationSettings() {
           </section>
         </div>
       )}
+      {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </div>
   );
 }

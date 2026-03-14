@@ -57,6 +57,7 @@ export default function EventCard({ event, onDelete }: Props) {
 
   async function handleDelete() {
     if (deleting) return;
+    if (!window.confirm("Delete this event? This cannot be undone.")) return;
     setDeleting(true);
     try {
       await api.deleteEvent(event.id);

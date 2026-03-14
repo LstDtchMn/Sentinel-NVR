@@ -8,6 +8,8 @@ import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { api, SystemConfig, StorageStats, RetentionRule, CameraDetail } from "../api/client";
 import { Settings as SettingsIcon } from "lucide-react";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 /** Format bytes as human-readable string (GiB / MiB / KiB). */
 function formatBytes(bytes: number): string {
@@ -52,6 +54,9 @@ export default function Settings() {
   );
   const [pairingLoading, setPairingLoading] = useState(false);
   const [pairingError, setPairingError] = useState<string | null>(null);
+
+  // Toast feedback
+  const { toast, showToast, dismissToast } = useToast();
 
   // Refs for cleanup on unmount
   const successTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
@@ -219,6 +224,7 @@ export default function Settings() {
       );
       setConfig(updated);
       setSaveSuccess(true);
+      showToast("Settings saved", "success");
       // Auto-dismiss success banner after 3 seconds
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
       successTimerRef.current = setTimeout(() => setSaveSuccess(false), 3_000);
@@ -571,16 +577,21 @@ export default function Settings() {
           )}
         </section>
 
-        <div className="flex justify-end">
-          <button
-            type="submit"
-            disabled={submitting || !dirty}
-            className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
-          >
-            {submitting ? "Saving..." : "Save Settings"}
-          </button>
-        </div>
+        {dirty && (
+          <div className="sticky bottom-0 bg-surface-base border-t border-border py-3 px-8 -mx-8">
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={submitting}
+                className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                {submitting ? "Saving..." : "Save Settings"}
+              </button>
+            </div>
+          </div>
+        )}
       </form>
+      {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </div>
   );
 }

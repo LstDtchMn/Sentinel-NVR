@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -38,6 +39,13 @@ import (
 
 // setupUsernameRE validates usernames during first-run setup.
 var setupUsernameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9_-]?$`)
+
+// testStreamMu + lastTestStreamTime rate-limit the test-stream endpoint to prevent
+// go2rtc resource exhaustion from rapid calls. Minimum 5s between requests.
+var (
+	testStreamMu       sync.Mutex
+	lastTestStreamTime time.Time
+)
 
 // parseSlogLevel converts a sentinel log_level string to a slog.Level constant.
 func parseSlogLevel(level string) slog.Level {
@@ -1976,6 +1984,16 @@ func (s *Server) handleTestNotification(c *gin.Context) {
 // POST /api/v1/cameras/test-stream
 // Body: {"url": "<stream_url>"}
 func (s *Server) handleTestStream(c *gin.Context) {
+	// Rate limit: at most one test-stream call every 5 seconds to prevent go2rtc resource exhaustion.
+	testStreamMu.Lock()
+	if time.Since(lastTestStreamTime) < 5*time.Second {
+		testStreamMu.Unlock()
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Please wait before testing another stream"})
+		return
+	}
+	lastTestStreamTime = time.Now()
+	testStreamMu.Unlock()
+
 	var req struct {
 		URL string `json:"url" binding:"required"`
 	}

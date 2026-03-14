@@ -119,9 +119,15 @@ export default function Models() {
       ) : (
         <div className="space-y-3 mb-8">
           {models.length === 0 && (
-            <p className="text-muted text-sm py-8 text-center">
-              No models available. Upload an ONNX model file to get started.
-            </p>
+            <div className="flex flex-col items-center justify-center py-12 gap-3">
+              <Box className="w-12 h-12 text-faint" />
+              <p className="text-muted">No models available</p>
+              {isAdmin && (
+                <p className="text-sm text-faint">
+                  Upload an ONNX model file below or download a curated model to get started.
+                </p>
+              )}
+            </div>
           )}
           {models.map((m) => (
             <div

@@ -25,7 +25,7 @@ export default {
           DEFAULT: "#30363D",
         },
         muted: "#8B949E",
-        faint: "#484F58",
+        faint: "#6E7681",
         status: {
           ok: "#3FB950",
           warn: "#D29922",

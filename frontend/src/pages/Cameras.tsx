@@ -7,6 +7,8 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import { api, CameraDetail, CameraState, CameraInput } from "../api/client";
 import { Camera, Circle, Edit2, MapPin, Plus, Trash2, X } from "lucide-react";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 const STATUS_COLORS: Record<CameraState, string> = {
   streaming: "text-green-400",
@@ -24,6 +26,8 @@ export default function Cameras() {
   const [editingCamera, setEditingCamera] = useState<CameraDetail | null>(null);
   // Tracks fire-and-forget manual refresh controllers so they can be cancelled on unmount.
   const manualCtrlRef = useRef<AbortController | null>(null);
+  // Toast feedback
+  const { toast, showToast, dismissToast } = useToast();
 
   const fetchCameras = useCallback((signal?: AbortSignal) => {
     api
@@ -63,7 +67,7 @@ export default function Cameras() {
   useEffect(() => () => manualCtrlRef.current?.abort(), []);
 
   const handleDelete = async (name: string) => {
-    if (!window.confirm(`Delete camera "${name}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete camera "${name}"? This will remove all associated recordings.`)) return;
     // Register this controller in manualCtrlRef so the unmount cleanup aborts it.
     // ctrl.signal.aborted then serves as the mounted-check for post-await code.
     manualCtrlRef.current?.abort();
@@ -72,6 +76,7 @@ export default function Cameras() {
     try {
       await api.deleteCamera(name, ctrl.signal);
       if (ctrl.signal.aborted) return; // component unmounted while DELETE was in-flight
+      showToast("Camera deleted", "success");
       manualCtrlRef.current?.abort();
       manualCtrlRef.current = new AbortController();
       fetchCameras(manualCtrlRef.current.signal);
@@ -83,6 +88,7 @@ export default function Cameras() {
 
   const handleAdded = () => {
     setShowForm(false);
+    showToast("Camera added", "success");
     manualCtrlRef.current?.abort();
     manualCtrlRef.current = new AbortController();
     fetchCameras(manualCtrlRef.current.signal);
@@ -161,6 +167,7 @@ export default function Cameras() {
           ))}
         </div>
       )}
+      {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </div>
   );
 }

@@ -249,6 +249,16 @@ export default function Events() {
                      text-white focus:outline-none focus:ring-1 focus:ring-sentinel-500
                      [color-scheme:dark]"
         />
+        <button
+          type="button"
+          onClick={() => {
+            const today = new Date().toISOString().split("T")[0];
+            setFilterDate(filterDate === today ? "" : today);
+          }}
+          className="text-xs px-2 py-1 rounded-full bg-sentinel-500/20 text-sentinel-400 hover:bg-sentinel-500/30 cursor-pointer"
+        >
+          Today
+        </button>
 
         {(filterCamera !== "" || filterType || filterDate) && (
           <button
@@ -275,9 +285,14 @@ export default function Events() {
           {error}
         </div>
       ) : events.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted">
-          <Activity className="w-12 h-12 opacity-20" />
-          <p>No events found</p>
+        <div className="flex-1 flex flex-col items-center justify-center gap-3">
+          <Activity className="w-12 h-12 text-faint" />
+          <p className="text-muted">No events found</p>
+          {(filterCamera !== "" || filterType || filterDate) && (
+            <p className="text-sm text-faint">
+              Try adjusting your filters or clearing them to see all events.
+            </p>
+          )}
         </div>
       ) : (
         <>

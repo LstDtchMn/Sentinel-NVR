@@ -153,8 +153,6 @@ services:
       - backend
 
   # ---- Frontend (dev server) ----
-  # No healthcheck — Vite dev server doesn't serve /health and the frontend is not
-  # a critical backend dependency. Production will use nginx with a static build.
   frontend:
     build:
       context: ./frontend
@@ -169,6 +167,12 @@ services:
     depends_on:
       sentinel:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:5173/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     logging:
       driver: json-file
       options:
