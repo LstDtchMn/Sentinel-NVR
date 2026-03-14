@@ -285,6 +285,38 @@ export interface ImportExecuteResult {
   warnings: string[];
 }
 
+// --- ONVIF Discovery types ---
+
+/** A camera discovered via ONVIF WS-Discovery multicast probe. */
+export interface DiscoveredCamera {
+  ip: string;
+  port: number;
+  name: string;
+  hardware: string;
+  xaddr: string;
+  endpoint_ref: string;
+}
+
+/** A single media stream profile returned by an ONVIF device probe. */
+export interface StreamProfile {
+  name: string;
+  token: string;
+  resolution: string;
+  encoding: string;
+  stream_uri: string;
+}
+
+/** Full device info + stream profiles returned by ONVIF probe. */
+export interface ProbeResult {
+  device: {
+    manufacturer: string;
+    model: string;
+    firmware_version: string;
+    serial_number: string;
+  };
+  streams: StreamProfile[];
+}
+
 /** Pairing code returned by POST /pairing/qr (Phase 12, CG11). */
 export interface PairingCode {
   code: string;
@@ -767,6 +799,29 @@ class ApiClient {
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  // --- ONVIF Discovery ---
+
+  /** Sends a WS-Discovery multicast probe to find ONVIF cameras on the local network. */
+  discoverCameras(signal?: AbortSignal): Promise<{ cameras: DiscoveredCamera[]; warning?: string }> {
+    return this.request<{ cameras: DiscoveredCamera[]; warning?: string }>("/onvif/discover", {
+      method: "POST",
+      signal,
+    });
+  }
+
+  /** Probes a specific ONVIF device for its media profiles and stream URIs. */
+  probeCamera(
+    body: { host: string; port: number; username: string; password: string },
+    signal?: AbortSignal,
+  ): Promise<ProbeResult> {
+    return this.request<ProbeResult>("/onvif/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
   }
 
   // --- Migration / Import (Phase 14, R15) ---

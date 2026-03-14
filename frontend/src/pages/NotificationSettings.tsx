@@ -100,6 +100,7 @@ export default function NotificationSettings() {
   }
 
   async function handleDeleteToken(id: number) {
+    if (!window.confirm("Remove this notification channel? This cannot be undone.")) return;
     try {
       await api.deleteNotifToken(id);
       setTokens((prev) => prev.filter((t) => t.id !== id));
@@ -136,6 +137,7 @@ export default function NotificationSettings() {
   }
 
   async function handleDeletePref(id: number) {
+    if (!window.confirm("Remove this alert rule? This cannot be undone.")) return;
     try {
       await api.deleteNotifPref(id);
       setPrefs((prev) => prev.filter((p) => p.id !== id));

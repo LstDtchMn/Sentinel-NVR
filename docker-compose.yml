@@ -9,7 +9,7 @@ services:
     ports:
       - "8099:8099"
     volumes:
-      - ./configs/sentinel.yml:/etc/sentinel/sentinel.yml:ro
+      - ./configs/sentinel.yml:/etc/sentinel/sentinel.yml
       - sentinel-data:/data
       # On Linux, create these dirs and chown to UID 10001 (sentinel user):
       #   sudo mkdir -p media/hot media/cold && sudo chown -R 10001:10001 media/

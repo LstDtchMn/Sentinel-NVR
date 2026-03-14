@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/storage"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/importers"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/models"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/onvif"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/pathutil"
 )
 
@@ -189,6 +191,10 @@ func (s *Server) registerRoutes() {
 		// Migration / import (Phase 14, R15)
 		protected.POST("/import/preview", s.handleImportPreview) // dry-run: parse + validate
 		protected.POST("/import", s.handleImportExecute)         // actually create cameras
+
+		// ONVIF camera discovery (admin-only)
+		protected.POST("/cameras/discover", s.handleDiscoverCameras)
+		protected.POST("/cameras/discover/probe", s.handleProbeCamera)
 
 		// Remote access (Phase 12, CG11, R8)
 		protected.GET("/relay/ice-servers", s.handleRelayICEServers)
@@ -2990,4 +2996,105 @@ func (s *Server) handleDeleteModel(c *gin.Context) {
 
 	s.logger.Info("model deleted", "model", filename)
 	c.Status(http.StatusNoContent)
+}
+
+// handleDiscoverCameras runs a WS-Discovery multicast probe for ONVIF cameras on the LAN.
+// POST /api/v1/cameras/discover — admin-only, no request body.
+// Returns {"cameras": [...], "warning": "..."} (warning set when multicast fails, e.g. Docker bridge).
+func (s *Server) handleDiscoverCameras(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 6*time.Second)
+	defer cancel()
+
+	devices, err := onvif.Discover(ctx, 5*time.Second)
+	if err != nil {
+		s.logger.Warn("onvif discovery failed", "error", err)
+		// Return empty list with warning — multicast often fails in Docker
+		c.JSON(http.StatusOK, gin.H{
+			"cameras": []struct{}{},
+			"warning": "ONVIF multicast discovery failed (this is expected in Docker bridge networking). Use the probe endpoint to query cameras by IP instead.",
+		})
+		return
+	}
+
+	if devices == nil {
+		devices = []onvif.DiscoveredDevice{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"cameras": devices})
+}
+
+// probeCameraRequest is the JSON body for POST /cameras/discover/probe.
+type probeCameraRequest struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// handleProbeCamera queries a specific ONVIF camera by IP/port.
+// POST /api/v1/cameras/discover/probe — admin-only.
+// Without credentials: returns device info (unauthenticated GetDeviceInformation).
+// With credentials: also returns stream profiles with RTSP URIs.
+func (s *Server) handleProbeCamera(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+
+	var req probeCameraRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if req.Host == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
+		return
+	}
+	if req.Port <= 0 || req.Port > 65535 {
+		req.Port = 80
+	}
+
+	// Validate host is an IP or hostname — reject URLs or paths
+	if net.ParseIP(req.Host) == nil {
+		// Not a bare IP — check it looks like a hostname (no scheme, no path)
+		if strings.Contains(req.Host, "/") || strings.Contains(req.Host, ":") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "host must be an IP address or hostname (not a URL)"})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 12*time.Second)
+	defer cancel()
+
+	// Always try to get device info (unauthenticated)
+	deviceInfo, err := onvif.ProbeDevice(ctx, req.Host, req.Port)
+	if err != nil {
+		s.logger.Warn("onvif probe failed", "host", req.Host, "port", req.Port, "error", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("could not reach ONVIF device at %s:%d — verify the IP and port are correct", req.Host, req.Port)})
+		return
+	}
+
+	result := gin.H{"device": deviceInfo}
+
+	// If credentials provided, also fetch stream profiles
+	if req.Username != "" && req.Password != "" {
+		xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", req.Host, req.Port)
+		streams, streamErr := onvif.GetStreamProfiles(ctx, xaddr, req.Username, req.Password)
+		if streamErr != nil {
+			s.logger.Warn("onvif stream profile fetch failed", "host", req.Host, "error", streamErr)
+			result["streams"] = []struct{}{}
+			result["stream_error"] = "failed to retrieve stream profiles — verify credentials are correct"
+		} else {
+			if streams == nil {
+				streams = []onvif.StreamProfile{}
+			}
+			result["streams"] = streams
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
 }

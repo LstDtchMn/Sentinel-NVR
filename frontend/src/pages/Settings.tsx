@@ -233,7 +233,9 @@ export default function Settings() {
       // On abort (component unmounted) skip all state updates — the finally block
       // would otherwise call setSubmitting(false) on the unmounted component.
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setSaveError(err instanceof Error ? err.message : "Failed to save settings");
+      const msg = err instanceof Error ? err.message : "Failed to save settings";
+      setSaveError(msg);
+      showToast(msg, "error");
       setSubmitting(false);
     }
   };

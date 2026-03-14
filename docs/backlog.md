@@ -40,8 +40,12 @@ Items are grouped by category and roughly prioritized within each group.
 - **Sidebar camera indicators** — recording status dots next to camera names in sidebar
 - **Dashboard disk capacity** — show % full, projected "days until full", disk warnings
 
+## Video Pipeline
+- **WebSocket reconnect backoff** — show "Stream unavailable" after N failed retries instead of infinite spinner
+- **Recording event debounce** — coalesce rapid recording start/stop events when stream is flaky
+
 ## Security & Infrastructure
 - **SSE session expiry** — validate JWT periodically during long-lived SSE connections
-- **Production frontend Dockerfile** — nginx serving static dist/ instead of Vite dev server
+- ~~**Production frontend Dockerfile**~~ — DONE (Dockerfile.prod + nginx.conf)
 - **Structured JSON logging** — configurable log format for production log aggregation
 - **Backup/restore procedure** — documented SQLite .backup + recording archival workflow
