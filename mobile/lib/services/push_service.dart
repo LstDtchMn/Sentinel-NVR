@@ -10,6 +10,7 @@
 // The Android notification channel ID "sentinel_alerts" must match the value
 // sent by the backend's FCMSender.Send() in internal/notification/fcm.go.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -30,6 +31,10 @@ class PushService {
 
   final FlutterLocalNotificationsPlugin _flnPlugin =
       FlutterLocalNotificationsPlugin();
+
+  StreamSubscription<String>? _tokenRefreshSub;
+  StreamSubscription<RemoteMessage>? _onMessageSub;
+  StreamSubscription<RemoteMessage>? _onMessageOpenedSub;
 
   /// GoRouter navigate callback — wired by main.dart after router is created.
   void Function(String route)? onNavigate;
@@ -80,15 +85,15 @@ class PushService {
     if (token != null) await _registerToken(token, api);
 
     // Re-register on token refresh (e.g. after app reinstall).
-    FirebaseMessaging.instance.onTokenRefresh.listen((t) => _registerToken(t, api));
+    _tokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen((t) => _registerToken(t, api));
 
     // Show local notification for foreground messages.
-    FirebaseMessaging.onMessage.listen((message) {
+    _onMessageSub = FirebaseMessaging.onMessage.listen((message) {
       _showLocalNotification(message);
     });
 
     // Handle notification tap when app is in background.
-    FirebaseMessaging.onMessageOpenedApp.listen((message) {
+    _onMessageOpenedSub = FirebaseMessaging.onMessageOpenedApp.listen((message) {
       _handleDeepLink(message);
     });
 
@@ -115,6 +120,7 @@ class PushService {
 
     final deepLink = message.data['deep_link'] as String?;
 
+    // TODO(review): L13 — notification.hashCode is unstable; use stable ID from message data
     _flnPlugin.show(
       notification.hashCode,
       notification.title,
@@ -133,6 +139,12 @@ class PushService {
       ),
       payload: deepLink,
     );
+  }
+
+  void dispose() {
+    _tokenRefreshSub?.cancel();
+    _onMessageSub?.cancel();
+    _onMessageOpenedSub?.cancel();
   }
 
   void _handleDeepLink(RemoteMessage message) {

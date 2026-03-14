@@ -73,6 +73,12 @@ type Pipeline struct {
 	detStartFailed bool
 	detFailCount   int
 
+	// Constructor args for re-creating detection/audio pipelines after stream recovery (C1 fix)
+	detector  detection.Detector
+	detCfg    config.DetectionConfig
+	rtspBase  string
+	deps      *PipelineDeps
+
 	mu     sync.RWMutex
 	status PipelineStatus
 }
@@ -119,6 +125,11 @@ func NewPipeline(
 		status:    PipelineStatus{State: StateIdle},
 	}
 
+	p.detector = detector
+	p.detCfg = detCfg
+	p.rtspBase = rtspBase
+	p.deps = deps
+
 	if cam.Record {
 		p.recorder = NewRecorder(cam, rtspBase, hotPath, segmentDuration, recRepo, bus, logger)
 	}
@@ -162,7 +173,7 @@ func NewPipeline(
 			p.detPipeline.SetFaceRecognition(
 				deps.FaceRecognizer,
 				deps.FaceRepo,
-				detCfg.FaceRecognition.MatchThreshold,
+				detCfg.FaceRecognition.MatchThresholdValue(),
 				detCfg.FaceRecognition.MaxFacesPerFrame,
 			)
 		}
@@ -175,7 +186,7 @@ func NewPipeline(
 		p.audioPipeline = detection.NewAudioPipeline(
 			detection.CameraInfo{ID: cam.ID, Name: cam.Name},
 			deps.AudioClassifier,
-			detCfg.AudioClassification.ConfidenceThreshold,
+			detCfg.AudioClassification.ConfidenceThresholdValue(),
 			time.Duration(detCfg.AudioClassification.SampleInterval)*time.Second,
 			audioRTSPURL,
 			bus,
@@ -217,9 +228,11 @@ func (p *Pipeline) Start() {
 			}
 			if p.detPipeline != nil && p.detPipeline.IsActive() {
 				p.detPipeline.Stop()
+				p.detPipeline = nil
 			}
 			if p.audioPipeline != nil && p.audioPipeline.IsActive() {
 				p.audioPipeline.Stop()
+				p.audioPipeline = nil
 			}
 			p.setStatus(func(s *PipelineStatus) {
 				s.State = StateStopped
@@ -260,6 +273,7 @@ func (p *Pipeline) checkStreamHealth() {
 		}
 		if p.detPipeline != nil && p.detPipeline.IsActive() {
 			p.detPipeline.Stop()
+			p.detPipeline = nil
 			p.detStartFailed = false
 			p.detFailCount = 0
 			p.setStatus(func(s *PipelineStatus) {
@@ -268,6 +282,7 @@ func (p *Pipeline) checkStreamHealth() {
 		}
 		if p.audioPipeline != nil && p.audioPipeline.IsActive() {
 			p.audioPipeline.Stop()
+			p.audioPipeline = nil
 			p.setStatus(func(s *PipelineStatus) {
 				s.AudioActive = false
 			})
@@ -345,12 +360,16 @@ func (p *Pipeline) checkStreamHealth() {
 				// Prefer sub-stream, but fall back to main stream (R2 messy stream handling)
 				detStreamActive = subActive || mainActive
 			}
-			if p.detPipeline != nil && !s.Detecting && detStreamActive {
+			if p.detector != nil && p.cam.Detect && !s.Detecting && detStreamActive {
 				needsStartDetection = true
 			}
 
 			// Audio pipeline uses the main stream (audio track).
-			if p.audioPipeline != nil && !p.audioPipeline.IsActive() && mainActive {
+			// After C1 fix, audioPipeline may be nil (discarded after stop) — check
+			// whether it can be re-created from stored constructor args.
+			audioRunning := p.audioPipeline != nil && p.audioPipeline.IsActive()
+			audioCanStart := p.audioPipeline != nil || (p.deps != nil && p.deps.AudioClassifier != nil && p.detCfg.AudioClassification.Enabled)
+			if !audioRunning && audioCanStart && mainActive && p.cam.Detect {
 				needsStartAudio = true
 			}
 		} else if mainExists && mainInfo != nil {
@@ -424,12 +443,14 @@ func (p *Pipeline) checkStreamHealth() {
 	}
 	if needsStopDetection && p.detPipeline != nil {
 		p.detPipeline.Stop()
+		p.detPipeline = nil // discard one-shot pipeline; will be re-created on recovery
 		p.detStartFailed = false
 		p.detFailCount = 0
 		p.logger.Info("detection stopped (stream lost)")
 	}
 	if needsStopAudio && p.audioPipeline != nil {
 		p.audioPipeline.Stop()
+		p.audioPipeline = nil // discard one-shot pipeline; will be re-created on recovery
 		p.setStatus(func(s *PipelineStatus) {
 			s.AudioActive = false
 		})
@@ -477,7 +498,43 @@ func (p *Pipeline) checkStreamHealth() {
 	// is pure Go and never returns an error — retry throttling is inside the pipeline
 	// itself (processFrame failCount). We still track detStartFailed for consistency
 	// if the pattern changes, but it is not currently set.
-	if needsStartDetection && p.detPipeline != nil {
+	if needsStartDetection && p.detector != nil && p.cam.Detect {
+		if p.detPipeline == nil {
+			// Re-create one-shot detection pipeline after stream recovery (C1 fix)
+			streamName := p.cam.Name
+			fallbackStreamName := ""
+			if p.cam.SubStream != "" {
+				streamName = p.cam.Name + "_sub"
+				fallbackStreamName = p.cam.Name
+			}
+			snapshotDir := filepath.Join(p.detCfg.SnapshotPath, SanitizeName(p.cam.Name))
+			var zones []detection.Zone
+			if len(p.cam.Zones) > 0 && string(p.cam.Zones) != "[]" {
+				if err := json.Unmarshal(p.cam.Zones, &zones); err != nil {
+					p.logger.Error("failed to parse camera zones", "camera", p.cam.Name, "error", err)
+				}
+			}
+			p.detPipeline = detection.NewDetectionPipeline(
+				detection.CameraInfo{ID: p.cam.ID, Name: p.cam.Name, Zones: zones},
+				streamName,
+				fallbackStreamName,
+				p.g2r,
+				p.detector,
+				snapshotDir,
+				p.detCfg.ConfidenceThresholdValue(),
+				time.Duration(p.detCfg.FrameInterval)*time.Second,
+				p.bus,
+				p.logger,
+			)
+			if p.deps != nil && p.deps.FaceRecognizer != nil && p.deps.FaceRepo != nil && p.detCfg.FaceRecognition.Enabled {
+				p.detPipeline.SetFaceRecognition(
+					p.deps.FaceRecognizer,
+					p.deps.FaceRepo,
+					p.detCfg.FaceRecognition.MatchThresholdValue(),
+					p.detCfg.FaceRecognition.MaxFacesPerFrame,
+				)
+			}
+		}
 		p.detPipeline.Start()
 		p.detStartFailed = false
 		p.detFailCount = 0
@@ -488,12 +545,26 @@ func (p *Pipeline) checkStreamHealth() {
 	}
 
 	// Start audio classification pipeline (Phase 13, R12).
-	if needsStartAudio && p.audioPipeline != nil {
-		p.audioPipeline.Start()
-		p.setStatus(func(s *PipelineStatus) {
-			s.AudioActive = true
-		})
-		p.logger.Info("audio classification started")
+	if needsStartAudio && p.cam.Detect {
+		if p.audioPipeline == nil && p.deps != nil && p.deps.AudioClassifier != nil && p.detCfg.AudioClassification.Enabled {
+			audioRTSPURL := p.rtspBase + "/" + p.cam.Name
+			p.audioPipeline = detection.NewAudioPipeline(
+				detection.CameraInfo{ID: p.cam.ID, Name: p.cam.Name},
+				p.deps.AudioClassifier,
+				p.detCfg.AudioClassification.ConfidenceThresholdValue(),
+				time.Duration(p.detCfg.AudioClassification.SampleInterval)*time.Second,
+				audioRTSPURL,
+				p.bus,
+				p.logger,
+			)
+		}
+		if p.audioPipeline != nil {
+			p.audioPipeline.Start()
+			p.setStatus(func(s *PipelineStatus) {
+				s.AudioActive = true
+			})
+			p.logger.Info("audio classification started")
+		}
 	}
 
 	// Periodically ensure next hour's directory exists (runs every health check = 5s, cheap no-op)

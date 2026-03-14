@@ -70,6 +70,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
         _webRtcSvc = null;
       });
       await oldSvc.dispose();
+      // TODO(review): L11 — add mounted check after await oldSvc.dispose()
     }
 
     final svc = WebRtcService();

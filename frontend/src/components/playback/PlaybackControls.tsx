@@ -31,6 +31,7 @@ export default function PlaybackControls({
   return (
     <div className="flex items-center justify-between">
       {/* Left: transport controls */}
+      {/* TODO(review): L8 — buttons use title only; add aria-label for screen readers */}
       <div className="flex items-center gap-2">
         <button
           onClick={onSkipPrev}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -90,7 +91,10 @@ func (r *RetentionRepository) Create(ctx context.Context, cameraID *int, eventTy
 		}
 		return nil, err
 	}
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("getting rule ID: %w", err)
+	}
 	return r.Get(ctx, int(id))
 }
 
@@ -103,7 +107,10 @@ func (r *RetentionRepository) Update(ctx context.Context, id, eventsDays int) (*
 	if err != nil {
 		return nil, err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("checking rows affected: %w", err)
+	}
 	if n == 0 {
 		return nil, ErrRuleNotFound
 	}
@@ -116,7 +123,10 @@ func (r *RetentionRepository) Delete(ctx context.Context, id int) error {
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
 	if n == 0 {
 		return ErrRuleNotFound
 	}

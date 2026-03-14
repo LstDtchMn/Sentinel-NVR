@@ -76,6 +76,10 @@ export default function LiveView() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // Show all enabled cameras — VideoPlayer handles connection errors gracefully.
+  // Cameras in error/idle state get a placeholder tile so users see them.
+  const displayCameras = cameras?.filter((cam) => cam.enabled);
+
   // Auto-clear focus when the focused camera is deleted or disabled so the user
   // is not left with a blank screen and no recovery path.
   useEffect(() => {
@@ -83,10 +87,6 @@ export default function LiveView() {
       setFocusedCamera(null);
     }
   }, [focusedCamera, displayCameras]);
-
-  // Show all enabled cameras — VideoPlayer handles connection errors gracefully.
-  // Cameras in error/idle state get a placeholder tile so users see them.
-  const displayCameras = cameras?.filter((cam) => cam.enabled);
 
   // Grid columns based on camera count
   const gridClass = getGridClass(displayCameras?.length ?? 0);

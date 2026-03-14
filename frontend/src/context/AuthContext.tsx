@@ -52,6 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+  // TODO(review): L9 — mountedRef cross-effect pattern fragile in StrictMode; prefer per-effect local variable
   const mountedRef = useRef(true);
 
   useEffect(() => {

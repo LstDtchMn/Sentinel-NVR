@@ -47,6 +47,7 @@ class _SetupScreenState extends State<SetupScreen> {
       // GoRouter redirect fires on isAuthenticated → true.
     } catch (e) {
       if (mounted) {
+        // TODO(review): L12 — use friendly error message instead of raw e.toString()
         setState(() => _error = e.toString());
       }
     } finally {

@@ -213,7 +213,7 @@ func main() {
 		}
 	}
 
-	detRepo := detection.NewRepository(database)
+	detRepo := detection.NewRepository(database, cfg.Detection.SnapshotPath)
 	logger.Info("event repository initialized") // always active; serves /api/v1/events regardless of detection.enabled
 
 	// Initialize notification repository + service (Phase 8, R9).
@@ -281,7 +281,7 @@ func main() {
 				logger,
 			)
 			logger.Info("face recognition enabled",
-				"threshold", cfg.Detection.FaceRecognition.MatchThreshold,
+				"threshold", cfg.Detection.FaceRecognition.MatchThresholdValue(),
 				"max_faces", cfg.Detection.FaceRecognition.MaxFacesPerFrame,
 			)
 		}
@@ -295,7 +295,7 @@ func main() {
 				logger,
 			)
 			logger.Info("audio classification enabled",
-				"threshold", cfg.Detection.AudioClassification.ConfidenceThreshold,
+				"threshold", cfg.Detection.AudioClassification.ConfidenceThresholdValue(),
 				"sample_interval", cfg.Detection.AudioClassification.SampleInterval,
 			)
 		}

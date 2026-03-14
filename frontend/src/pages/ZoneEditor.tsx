@@ -342,6 +342,7 @@ export default function ZoneEditor() {
   };
 
   // Escape key cancels in-progress drawing
+  // TODO(review): L5 — Escape handler reads drawState from closure (stale closure risk); use drawStateRef
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape" && drawState === "drawing") {

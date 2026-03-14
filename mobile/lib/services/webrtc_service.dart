@@ -87,7 +87,7 @@ class WebRtcService {
     // Listen for messages from go2rtc via the backend relay.
     // Store subscription so _cleanup() can cancel it on dispose.
     _wsSub = _ws!.listen(
-      _onMessage,
+      (raw) => _onMessage(raw),
       onError: (_) {},
       onDone: () {},
       cancelOnError: false,
@@ -98,9 +98,10 @@ class WebRtcService {
   }
 
   void _onMessage(dynamic raw) async {
+    if (raw is! String) return; // drop binary WebSocket frames
     if (_disposed || _pc == null) return;
     try {
-      final msg = jsonDecode(raw as String) as Map<String, dynamic>;
+      final msg = jsonDecode(raw) as Map<String, dynamic>;
       final type = msg['type'] as String?;
 
       if (type == 'webrtc/offer') {

@@ -157,7 +157,7 @@ type DetectionConfig struct {
 type FaceRecognitionConfig struct {
 	Enabled          bool    `yaml:"enabled"`
 	Model            string  `yaml:"model"`             // path to ArcFace ONNX model; default auto-resolved
-	MatchThreshold   float64 `yaml:"match_threshold"`   // cosine similarity threshold [0.0-1.0]; default 0.6
+	MatchThreshold   *float64 `yaml:"match_threshold"`   // cosine similarity threshold [0.0-1.0]; default 0.6
 	MaxFacesPerFrame int     `yaml:"max_faces_per_frame"` // limit face crops per frame; default 5
 }
 
@@ -167,7 +167,7 @@ type FaceRecognitionConfig struct {
 type AudioClassificationConfig struct {
 	Enabled            bool    `yaml:"enabled"`
 	Model              string  `yaml:"model"`              // path to YAMNet ONNX model; default auto-resolved
-	ConfidenceThreshold float64 `yaml:"confidence_threshold"` // minimum score to publish event; default 0.7
+	ConfidenceThreshold *float64 `yaml:"confidence_threshold"` // minimum score to publish event; default 0.7
 	SampleInterval     int     `yaml:"sample_interval"`    // seconds between audio samples per camera; default 3
 }
 
@@ -316,18 +316,22 @@ func Validate(cfg *Config) error {
 
 	// Validate Phase 13 sub-feature thresholds (R11, R12).
 	if cfg.Detection.FaceRecognition.Enabled {
-		t := cfg.Detection.FaceRecognition.MatchThreshold
-		if t < 0.0 || t > 1.0 {
-			return fmt.Errorf("detection.face_recognition.match_threshold %g is out of range [0.0, 1.0]", t)
+		if cfg.Detection.FaceRecognition.MatchThreshold != nil {
+			t := *cfg.Detection.FaceRecognition.MatchThreshold
+			if t < 0.0 || t > 1.0 {
+				return fmt.Errorf("detection.face_recognition.match_threshold %g is out of range [0.0, 1.0]", t)
+			}
 		}
 		if cfg.Detection.FaceRecognition.MaxFacesPerFrame < 1 {
 			return fmt.Errorf("detection.face_recognition.max_faces_per_frame must be >= 1")
 		}
 	}
 	if cfg.Detection.AudioClassification.Enabled {
-		t := cfg.Detection.AudioClassification.ConfidenceThreshold
-		if t < 0.0 || t > 1.0 {
-			return fmt.Errorf("detection.audio_classification.confidence_threshold %g is out of range [0.0, 1.0]", t)
+		if cfg.Detection.AudioClassification.ConfidenceThreshold != nil {
+			t := *cfg.Detection.AudioClassification.ConfidenceThreshold
+			if t < 0.0 || t > 1.0 {
+				return fmt.Errorf("detection.audio_classification.confidence_threshold %g is out of range [0.0, 1.0]", t)
+			}
 		}
 		if cfg.Detection.AudioClassification.SampleInterval < 1 {
 			return fmt.Errorf("detection.audio_classification.sample_interval must be >= 1")
@@ -414,6 +418,24 @@ func (d *DetectionConfig) ConfidenceThresholdValue() float64 {
 	return 0.6
 }
 
+// MatchThresholdValue returns the effective face recognition match threshold,
+// defaulting to 0.6 if not explicitly configured.
+func (f *FaceRecognitionConfig) MatchThresholdValue() float64 {
+	if f.MatchThreshold != nil {
+		return *f.MatchThreshold
+	}
+	return 0.6
+}
+
+// ConfidenceThresholdValue returns the effective audio classification confidence
+// threshold, defaulting to 0.7 if not explicitly configured.
+func (a *AudioClassificationConfig) ConfidenceThresholdValue() float64 {
+	if a.ConfidenceThreshold != nil {
+		return *a.ConfidenceThreshold
+	}
+	return 0.7
+}
+
 // validateURL checks that a URL string has a valid scheme and host.
 // Used by Validate to catch misconfigured go2rtc URLs before they cause
 // confusing network errors at runtime.
@@ -495,16 +517,18 @@ func setDefaults(cfg *Config) {
 	}
 
 	// Phase 13: Face recognition defaults (R11)
-	if cfg.Detection.FaceRecognition.MatchThreshold == 0 {
-		cfg.Detection.FaceRecognition.MatchThreshold = 0.6
+	if cfg.Detection.FaceRecognition.MatchThreshold == nil {
+		v := 0.6
+		cfg.Detection.FaceRecognition.MatchThreshold = &v
 	}
 	if cfg.Detection.FaceRecognition.MaxFacesPerFrame == 0 {
 		cfg.Detection.FaceRecognition.MaxFacesPerFrame = 5
 	}
 
 	// Phase 13: Audio classification defaults (R12)
-	if cfg.Detection.AudioClassification.ConfidenceThreshold == 0 {
-		cfg.Detection.AudioClassification.ConfidenceThreshold = 0.7
+	if cfg.Detection.AudioClassification.ConfidenceThreshold == nil {
+		v := 0.7
+		cfg.Detection.AudioClassification.ConfidenceThreshold = &v
 	}
 	if cfg.Detection.AudioClassification.SampleInterval == 0 {
 		cfg.Detection.AudioClassification.SampleInterval = 3

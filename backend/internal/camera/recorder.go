@@ -307,8 +307,10 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 	// should refine these values using ffprobe or the next segment's start time.
 	// Pass info.ModTime() so parseSegmentTime doesn't need a second os.Stat call.
 	startTime := r.parseSegmentTime(segPath, info.ModTime())
-	endTime := startTime.Add(time.Duration(r.segmentDuration) * time.Minute)
-	durationS := float64(r.segmentDuration * 60)
+	segSec := int64(r.segmentDuration * 60)
+	nextBoundary := ((startTime.Unix() / segSec) + 1) * segSec
+	endTime := time.Unix(nextBoundary, 0).In(startTime.Location())
+	durationS := endTime.Sub(startTime).Seconds()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

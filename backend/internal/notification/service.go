@@ -51,6 +51,10 @@ func NewService(repo *Repository, senders map[string]Sender, bus *eventbus.Bus, 
 // so we must not inherit it for the recovery scan.
 func (s *Service) Start() {
 	s.startOnce.Do(func() {
+		// Set started BEFORE goroutine launch so Stop() can reliably
+		// detect that Start() has been called and wait on <-s.done.
+		s.started.Store(true)
+
 		// Track both goroutines so Stop() blocks until all work finishes —
 		// prevents use-after-close on the DB if recoverPending() is still
 		// sending when the database closes during shutdown.
@@ -63,9 +67,6 @@ func (s *Service) Start() {
 			defer s.wg.Done()
 			s.run()
 		}()
-		// Set started AFTER goroutine launch so Stop() won't block on
-		// <-s.done before run() has been scheduled.
-		s.started.Store(true)
 	})
 }
 

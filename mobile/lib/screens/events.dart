@@ -384,6 +384,7 @@ class _FilterSheetState extends State<_FilterSheet> {
       firstDate: DateTime(2020),
       lastDate: DateTime.now(),
     );
+    // TODO(review): L10 — add mounted guard after await showDatePicker
     if (picked != null) {
       setState(() => _date = DateFormat('yyyy-MM-dd').format(picked));
     }

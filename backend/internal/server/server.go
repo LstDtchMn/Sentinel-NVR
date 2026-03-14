@@ -68,6 +68,7 @@ func New(cfg *config.Config, configPath string, version string, db *sql.DB, auth
 	}
 
 	router := gin.New()
+	router.SetTrustedProxies(nil) // use remote addr only; prevents X-Forwarded-For spoofing
 	router.MaxMultipartMemory = 8 << 20 // 8MB limit for multipart uploads (Phase 14 imports)
 
 	// Resolve storage path symlinks at startup so isUnderPath comparisons work

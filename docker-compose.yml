@@ -167,7 +167,8 @@ services:
       - ./frontend:/app
       - /app/node_modules
     depends_on:
-      - sentinel
+      sentinel:
+        condition: service_healthy
     logging:
       driver: json-file
       options:

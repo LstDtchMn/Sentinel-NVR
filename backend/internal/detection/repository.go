@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/dbutil"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/pathutil"
 )
 
 // EventRecord represents a single row from the events table.
@@ -47,12 +48,15 @@ type ListFilter struct {
 
 // Repository provides CRUD access to the events table.
 type Repository struct {
-	db *sql.DB
+	db           *sql.DB
+	snapshotBase string // base directory for snapshot thumbnails (path containment check)
 }
 
 // NewRepository creates an events repository.
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+// snapshotBase is the base directory for snapshot thumbnails; only files under
+// this path are removed during retention cleanup (path containment check).
+func NewRepository(db *sql.DB, snapshotBase string) *Repository {
+	return &Repository{db: db, snapshotBase: snapshotBase}
 }
 
 // List returns events matching the filter in reverse chronological order,
@@ -203,11 +207,15 @@ func (r *Repository) DeleteOlderThan(ctx context.Context, cameraID *int, eventTy
 	if err != nil {
 		return 0, fmt.Errorf("deleting expired events: %w", err)
 	}
-	n, _ := result.RowsAffected()
+	n, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		return 0, fmt.Errorf("checking rows affected: %w", rowsErr)
+	}
 
-	// Best-effort thumbnail cleanup — log nothing here; callers that care can check.
+	// Best-effort thumbnail cleanup — only remove files under the configured snapshot
+	// base directory (path containment check prevents deleting arbitrary files).
 	for _, ro := range batch {
-		if ro.thumbnail != "" {
+		if ro.thumbnail != "" && pathutil.IsUnderPath(ro.thumbnail, r.snapshotBase) {
 			_ = os.Remove(ro.thumbnail)
 		}
 	}

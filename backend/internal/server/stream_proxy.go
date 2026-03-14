@@ -125,6 +125,8 @@ func (s *Server) handleStreamWS(c *gin.Context) {
 
 // relayWS copies WebSocket messages from src to dst until the context is cancelled
 // or either connection closes. It handles both text (JSON) and binary (fMP4) messages.
+// Each write has a 10-second timeout to prevent a slow consumer from blocking the
+// relay indefinitely (backpressure).
 func relayWS(ctx context.Context, src, dst *websocket.Conn, direction string) error {
 	for {
 		msgType, data, err := src.Read(ctx)
@@ -132,7 +134,9 @@ func relayWS(ctx context.Context, src, dst *websocket.Conn, direction string) er
 			return fmt.Errorf("%s read: %w", direction, err)
 		}
 
-		err = dst.Write(ctx, msgType, data)
+		writeCtx, writeCancel := context.WithTimeout(ctx, 10*time.Second)
+		err = dst.Write(writeCtx, msgType, data)
+		writeCancel()
 		if err != nil {
 			return fmt.Errorf("%s write: %w", direction, err)
 		}

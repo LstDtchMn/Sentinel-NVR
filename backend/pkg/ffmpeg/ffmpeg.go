@@ -22,21 +22,6 @@ const (
 	HWAccelVideoToolbox HWAccel = "videotoolbox" // macOS
 )
 
-// ProbeResult contains stream information from ffprobe.
-type ProbeResult struct {
-	Width     int
-	Height    int
-	Codec     string
-	FPS       float64
-	HasAudio  bool
-}
-
-// Probe queries stream metadata without starting a full decode.
-func Probe(ctx context.Context, streamURL string) (*ProbeResult, error) {
-	// TODO: Phase 4 (Playback) — implement ffprobe -v quiet -print_format json -show_streams <url>
-	return nil, fmt.Errorf("not yet implemented")
-}
-
 // DetectArgs builds FFmpeg arguments for decoding a sub-stream for AI detection.
 // Outputs raw frames to stdout at a reduced FPS for the detection pipeline.
 func DetectArgs(streamURL string, width, height, fps int, hwaccel HWAccel) []string {

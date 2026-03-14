@@ -65,8 +65,14 @@ func (r *Repository) CreateUser(ctx context.Context, username, passwordHash, rol
 	if err != nil {
 		return nil, fmt.Errorf("creating user %q: %w", username, err)
 	}
-	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
+	u.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", err)
+	}
+	u.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", err)
+	}
 	return &u, nil
 }
 
@@ -86,8 +92,14 @@ func (r *Repository) GetUserByUsername(ctx context.Context, username string) (*U
 	if err != nil {
 		return nil, fmt.Errorf("getting user %q: %w", username, err)
 	}
-	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
+	u.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", err)
+	}
+	u.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", err)
+	}
 	return &u, nil
 }
 
@@ -105,8 +117,14 @@ func (r *Repository) GetUserByID(ctx context.Context, id int) (*User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("getting user %d: %w", id, err)
 	}
-	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
+	u.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", err)
+	}
+	u.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", err)
+	}
 	return &u, nil
 }
 
@@ -142,7 +160,10 @@ func (r *Repository) GetRefreshToken(ctx context.Context, token string) (*Refres
 		return nil, fmt.Errorf("getting refresh token: parsing expires_at %q: %w", expiresStr, err)
 	}
 	rt.ExpiresAt = expiresAt
-	rt.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr) // created_at is informational; parse failure non-fatal
+	rt.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("getting refresh token: parsing created_at %q: %w", createdStr, err)
+	}
 	if time.Now().After(rt.ExpiresAt) {
 		return nil, ErrTokenExpired
 	}
@@ -172,7 +193,10 @@ func (r *Repository) ClaimRefreshToken(ctx context.Context, token string) (*Refr
 		return nil, fmt.Errorf("claiming refresh token: parsing expires_at %q: %w", expiresStr, err)
 	}
 	rt.ExpiresAt = expiresAt
-	rt.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
+	rt.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("claiming refresh token: parsing created_at %q: %w", createdStr, err)
+	}
 	if time.Now().After(rt.ExpiresAt) {
 		return nil, ErrTokenExpired
 	}
@@ -200,8 +224,14 @@ func (r *Repository) GetUserByOIDCSub(ctx context.Context, sub string) (*User, e
 	if err != nil {
 		return nil, fmt.Errorf("getting user by OIDC sub: %w", err)
 	}
-	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
+	u.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", err)
+	}
+	u.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", err)
+	}
 	return &u, nil
 }
 
@@ -219,8 +249,14 @@ func (r *Repository) CreateOIDCUser(ctx context.Context, sub, username, role str
 	if err != nil {
 		return nil, fmt.Errorf("creating OIDC user %q: %w", username, err)
 	}
-	u.CreatedAt, _ = dbutil.ParseSQLiteTime(createdStr)
-	u.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedStr)
+	u.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", err)
+	}
+	u.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", err)
+	}
 	return &u, nil
 }
 

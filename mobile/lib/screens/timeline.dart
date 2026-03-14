@@ -54,6 +54,7 @@ class _TimelineScreenState extends State<TimelineScreen> {
     if (_videoCtrl != null && _videoListener != null) {
       _videoCtrl!.removeListener(_videoListener!);
     }
+    // TODO(review): L14 — VideoPlayerController.dispose() should be awaited in async context
     _videoCtrl?.dispose();
     super.dispose();
   }
@@ -119,7 +120,6 @@ class _TimelineScreenState extends State<TimelineScreen> {
   }
 
   Future<void> _playSegment(TimelineSegment seg, {int initialOffset = 0}) async {
-    if (_videoLoading) return; // prevent concurrent loads from rapid timeline taps
     final gen = ++_generation; // capture generation for stale-callback detection
     setState(() => _videoLoading = true);
 

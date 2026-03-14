@@ -41,6 +41,7 @@ export default function EventCard({ event, onDelete }: Props) {
       await api.deleteEvent(event.id);
       onDelete(event.id);
     } catch {
+      // TODO(review): L3 — show error to user on delete failure
       setDeleting(false);
     }
   }

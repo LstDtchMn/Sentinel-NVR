@@ -89,6 +89,7 @@ func (s *Server) registerRoutes() {
 		protected.Use(s.authService.Middleware())
 	}
 	{
+		protected.GET("/admin/health", s.handleAdminHealth) // admin-only detailed health
 		protected.GET("/config", s.handleGetConfig)
 		protected.PUT("/config", s.handleUpdateConfig) // admin-only; Phase 9 settings persistence
 
@@ -306,6 +307,7 @@ func (s *Server) handleAuthLogin(c *gin.Context) {
 	// Reset rate limit on successful login so legitimate users aren't locked out.
 	s.loginLimiter.reset(ip)
 	auth.SetTokenCookies(c, pair, s.snapConfig().Auth.SecureCookie)
+	s.logger.Info("user logged in", "username", req.Username)
 	c.JSON(http.StatusOK, gin.H{"message": "logged in"})
 }
 
@@ -371,9 +373,21 @@ func (s *Server) handleAuthMe(c *gin.Context) {
 	})
 }
 
-// handleHealth returns system health including DB and go2rtc status.
-// Returns 200 when all subsystems are healthy, 503 when any critical subsystem is degraded.
+// handleHealth returns a minimal public health check.
 func (s *Server) handleHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"version": s.version,
+	})
+}
+
+// handleAdminHealth returns detailed system health including DB and go2rtc status.
+// Returns 200 when all subsystems are healthy, 503 when any critical subsystem is degraded.
+func (s *Server) handleAdminHealth(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+
 	dbStatus := "connected"
 	if err := s.db.Ping(); err != nil {
 		dbStatus = "error"
@@ -466,8 +480,8 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 		LogLevel string `json:"log_level"`
 	}
 	type safeStorage struct {
-		HotPath           string `json:"hot_path"`
-		ColdPath          string `json:"cold_path"`
+		HotPath           string `json:"hot_path,omitempty"`
+		ColdPath          string `json:"cold_path,omitempty"`
 		HotRetentionDays  int    `json:"hot_retention_days"`
 		ColdRetentionDays int    `json:"cold_retention_days"`
 		SegmentDuration   int    `json:"segment_duration"`
@@ -499,20 +513,25 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 	}
 
 	cfg := s.snapConfig()
+	role, _ := c.Get("role")
+	isAdmin := role == "admin"
+	st := safeStorage{
+		HotRetentionDays:  cfg.Storage.HotRetentionDays,
+		ColdRetentionDays: cfg.Storage.ColdRetentionDays,
+		SegmentDuration:   cfg.Storage.SegmentDuration,
+		SegmentFormat:     cfg.Storage.SegmentFormat,
+	}
+	if isAdmin {
+		st.HotPath = cfg.Storage.HotPath
+		st.ColdPath = cfg.Storage.ColdPath
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"server": safeServer{
 			Host:     cfg.Server.Host,
 			Port:     cfg.Server.Port,
 			LogLevel: cfg.Server.LogLevel,
 		},
-		"storage": safeStorage{
-			HotPath:           cfg.Storage.HotPath,
-			ColdPath:          cfg.Storage.ColdPath,
-			HotRetentionDays:  cfg.Storage.HotRetentionDays,
-			ColdRetentionDays: cfg.Storage.ColdRetentionDays,
-			SegmentDuration:   cfg.Storage.SegmentDuration,
-			SegmentFormat:     cfg.Storage.SegmentFormat,
-		},
+		"storage":   st,
 		"detection": gin.H{"enabled": cfg.Detection.Enabled, "backend": cfg.Detection.Backend},
 		"cameras":   safeCams,
 	})
@@ -542,9 +561,9 @@ func (s *Server) handleUpdateConfig(c *gin.Context) {
 		return
 	}
 
-	s.cfgMu.Lock()
-	// Stage all changes in a local copy so a validation failure never corrupts the live config.
-	cfgCopy := *s.cfg
+	// Snapshot the current config, apply changes, and validate OUTSIDE the write
+	// lock so that Validate()'s CPU work does not block concurrent readers.
+	cfgCopy := s.snapConfig()
 	if input.Server != nil && input.Server.LogLevel != "" {
 		cfgCopy.Server.LogLevel = input.Server.LogLevel
 	}
@@ -560,10 +579,11 @@ func (s *Server) handleUpdateConfig(c *gin.Context) {
 		}
 	}
 	if err := config.Validate(&cfgCopy); err != nil {
-		s.cfgMu.Unlock()
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	s.cfgMu.Lock()
 	*s.cfg = cfgCopy // only assign after validation passes
 	s.cfgMu.Unlock()  // release lock before disk I/O so reads are not blocked
 
@@ -740,6 +760,7 @@ func (s *Server) handleCreateCamera(c *gin.Context) {
 		return
 	}
 
+	s.logger.Info("camera created", "name", rec.Name, "user", c.GetString("username"))
 	c.JSON(http.StatusCreated, result)
 }
 
@@ -783,6 +804,7 @@ func (s *Server) handleUpdateCamera(c *gin.Context) {
 		return
 	}
 
+	s.logger.Info("camera updated", "name", name, "user", c.GetString("username"))
 	c.JSON(http.StatusOK, result)
 }
 
@@ -807,6 +829,7 @@ func (s *Server) handleDeleteCamera(c *gin.Context) {
 		return
 	}
 
+	s.logger.Info("camera deleted", "name", name, "user", c.GetString("username"))
 	c.Status(http.StatusNoContent)
 }
 
@@ -839,6 +862,7 @@ func (s *Server) handleCameraSnapshot(c *gin.Context) {
 	}
 
 	// Prefer sub-stream for snapshots — lower resolution, faster frame grab.
+	// TODO(review): L15 — add main-stream fallback when sub-stream snapshot fails
 	streamName := cam.Name
 	if cam.SubStream != "" {
 		streamName = cam.Name + "_sub"
@@ -1784,6 +1808,7 @@ func (s *Server) handleUpsertNotifPref(c *gin.Context) {
 
 	// Validate event_type against the set of event types the system actually emits.
 	// This prevents garbage rows and potential stored-XSS if the frontend renders the value.
+	// TODO(review): L16 — deduplicate with storage.KnownEventTypes
 	validEventTypes := map[string]bool{
 		"*":                   true,
 		"detection":           true,
@@ -2272,6 +2297,8 @@ func (s *Server) handleDeleteFace(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
+	idStr := c.Param("id")
+	s.logger.Info("face deleted", "id", idStr, "user", c.GetString("username"))
 	c.Status(http.StatusNoContent)
 }
 
@@ -2331,6 +2358,7 @@ func (s *Server) handleEnrollFace(c *gin.Context) {
 
 	embeddings, err := s.faceRecognizer.EmbedFaces(embedCtx, jpegBytes, 1)
 	if err != nil {
+		// TODO(review): L19 — return generic error message, log detail server-side
 		s.logger.Warn("face embed call failed", "error", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("face embedding failed: %v", err)})
 		return
@@ -2349,7 +2377,7 @@ func (s *Server) handleEnrollFace(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	face, err := s.faceRepo.Create(ctx, name, embedding, "")
@@ -2443,9 +2471,6 @@ func (s *Server) handleImportExecute(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-	defer cancel()
-
 	imported := 0
 	skipped := 0
 	// Copy parse errors into a separate slice — appending to result.Errors would
@@ -2467,7 +2492,9 @@ func (s *Server) handleImportExecute(c *gin.Context) {
 			ONVIFPass:  cam.ONVIFPass,
 		}
 
-		_, err := s.camManager.AddCamera(ctx, rec)
+		camCtx, camCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, err := s.camManager.AddCamera(camCtx, rec)
+		camCancel()
 		if err != nil {
 			if errors.Is(err, camera.ErrDuplicate) {
 				skipped++
@@ -2502,7 +2529,12 @@ func (s *Server) handleImportExecute(c *gin.Context) {
 // handleListRetentionRules returns all configured retention rules.
 // GET /api/v1/retention/rules
 func (s *Server) handleListRetentionRules(c *gin.Context) {
-	rules, err := s.retentionRepo.List(c.Request.Context())
+	if !s.requireAdmin(c) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	rules, err := s.retentionRepo.List(ctx)
 	if err != nil {
 		s.logger.Error("retention rules: list failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list retention rules"})
@@ -2609,7 +2641,9 @@ func (s *Server) handleDeleteRetentionRule(c *gin.Context) {
 		return
 	}
 
-	if err := s.retentionRepo.Delete(c.Request.Context(), id); err != nil {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	if err := s.retentionRepo.Delete(ctx, id); err != nil {
 		if errors.Is(err, storage.ErrRuleNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "retention rule not found"})
 			return
@@ -2636,6 +2670,9 @@ type modelEntry struct {
 // handleListModels returns the curated manifest merged with locally installed models.
 // GET /api/v1/models
 func (s *Server) handleListModels(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
 	local, err := s.modelManager.ListLocal()
 	if err != nil {
 		s.logger.Error("models: list local failed", "error", err)

@@ -42,9 +42,17 @@ func New(bufferSize int, logger *slog.Logger) *Bus {
 
 // Subscribe returns a channel that receives events for the given topic.
 // Use "*" to subscribe to all events.
+// If the bus is already closed, returns an immediately-closed channel so
+// callers using "for range ch" exit without blocking.
 func (b *Bus) Subscribe(topic string) <-chan Event {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if b.closed.Load() {
+		ch := make(chan Event)
+		close(ch)
+		return ch
+	}
 
 	ch := make(chan Event, b.bufferSize)
 	b.subscribers[topic] = append(b.subscribers[topic], ch)

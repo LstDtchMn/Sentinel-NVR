@@ -4,6 +4,7 @@ package notification
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -48,14 +49,20 @@ func (r *Repository) tokenByValue(ctx context.Context, userID int, provider, tok
 		 FROM notification_tokens WHERE user_id=? AND provider=? AND token=?`,
 		userID, provider, token,
 	).Scan(&rec.ID, &rec.UserID, &rec.Token, &rec.Provider, &rec.Label, &createdAt, &updatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	rec.CreatedAt, _ = dbutil.ParseSQLiteTime(createdAt)
-	rec.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedAt)
+	rec.CreatedAt, err = dbutil.ParseSQLiteTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", err)
+	}
+	rec.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", err)
+	}
 	return rec, nil
 }
 
@@ -78,8 +85,15 @@ func (r *Repository) ListTokensByUser(ctx context.Context, userID int) ([]TokenR
 		if err := rows.Scan(&rec.ID, &rec.UserID, &rec.Token, &rec.Provider, &rec.Label, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		rec.CreatedAt, _ = dbutil.ParseSQLiteTime(createdAt)
-		rec.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedAt)
+		var parseErr error
+		rec.CreatedAt, parseErr = dbutil.ParseSQLiteTime(createdAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", parseErr)
+		}
+		rec.UpdatedAt, parseErr = dbutil.ParseSQLiteTime(updatedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing updated_at: %w", parseErr)
+		}
 		tokens = append(tokens, rec)
 	}
 	if tokens == nil {
@@ -125,8 +139,15 @@ func (r *Repository) TokensByUserAndProvider(ctx context.Context, userID int, pr
 		if err := rows.Scan(&rec.ID, &rec.UserID, &rec.Token, &rec.Provider, &rec.Label, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		rec.CreatedAt, _ = dbutil.ParseSQLiteTime(createdAt)
-		rec.UpdatedAt, _ = dbutil.ParseSQLiteTime(updatedAt)
+		var parseErr error
+		rec.CreatedAt, parseErr = dbutil.ParseSQLiteTime(createdAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", parseErr)
+		}
+		rec.UpdatedAt, parseErr = dbutil.ParseSQLiteTime(updatedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing updated_at: %w", parseErr)
+		}
 		tokens = append(tokens, rec)
 	}
 	return tokens, rows.Err()
@@ -144,8 +165,8 @@ func (r *Repository) UpsertPref(ctx context.Context, p PrefRecord) (*PrefRecord,
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO notification_prefs (user_id, event_type, camera_id, enabled, critical)
 		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(user_id, event_type, camera_id) DO UPDATE
-		 SET enabled=excluded.enabled, critical=excluded.critical`,
+		 ON CONFLICT(user_id, event_type, COALESCE(camera_id, -1))
+		 DO UPDATE SET enabled=excluded.enabled, critical=excluded.critical, updated_at=datetime('now')`,
 		p.UserID, p.EventType, p.CameraID, boolToInt(p.Enabled), boolToInt(p.Critical),
 	)
 	if err != nil {
@@ -174,7 +195,7 @@ func (r *Repository) getPrefByKey(ctx context.Context, userID int, eventType str
 			userID, eventType, *cameraID,
 		).Scan(&rec.ID, &rec.UserID, &rec.EventType, &rec.CameraID, &enabled, &critical)
 	}
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -295,7 +316,10 @@ func (r *Repository) CreateLog(ctx context.Context, l LogRecord) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("create log: %w", err)
 	}
-	id, _ := res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("getting log ID: %w", err)
+	}
 	return int(id), nil
 }
 
@@ -410,9 +434,16 @@ func (r *Repository) ListLogsByUser(ctx context.Context, userID, limit int) ([]L
 		}
 		rec.DeepLink = deepLink.String
 		rec.LastError = lastErr.String
-		rec.ScheduledAt, _ = dbutil.ParseSQLiteTime(scheduledAt)
+		var parseErr error
+		rec.ScheduledAt, parseErr = dbutil.ParseSQLiteTime(scheduledAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing scheduled_at: %w", parseErr)
+		}
 		if sentAt.Valid {
-			t, _ := dbutil.ParseSQLiteTime(sentAt.String)
+			t, parseErr := dbutil.ParseSQLiteTime(sentAt.String)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parsing sent_at: %w", parseErr)
+			}
 			rec.SentAt = &t
 		}
 		logs = append(logs, rec)

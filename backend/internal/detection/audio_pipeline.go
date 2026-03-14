@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"sync"
@@ -231,20 +232,29 @@ func (ap *AudioPipeline) extractAudio(ctx context.Context, durationSec string) (
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		// Include stderr in the error for ffmpeg diagnostics.
-		// Truncate at rune boundary to avoid splitting multi-byte UTF-8 sequences.
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ffmpeg start: %w", err)
+	}
+	const maxAudioBytes = 10 << 20 // 10 MiB
+	pcmData, readErr := io.ReadAll(io.LimitReader(stdoutPipe, maxAudioBytes))
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return nil, fmt.Errorf("reading ffmpeg audio output: %w", readErr)
+	}
+	if waitErr != nil {
 		stderrStr := stderr.String()
 		runes := []rune(stderrStr)
 		if len(runes) > 200 {
 			stderrStr = string(runes[:200]) + "..."
 		}
-		return nil, fmt.Errorf("ffmpeg audio extraction: %w (stderr: %s)", err, stderrStr)
+		return nil, fmt.Errorf("ffmpeg audio extraction: %w (stderr: %s)", waitErr, stderrStr)
 	}
-
-	return stdout.Bytes(), nil
+	return pcmData, nil
 }

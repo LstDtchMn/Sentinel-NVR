@@ -55,7 +55,7 @@ func insertTestEvent(t *testing.T, database *sql.DB, camID *int, evType string, 
 
 func TestDeleteOlderThan_BasicDelete(t *testing.T) {
 	database := openDetTestDB(t)
-	repo := NewRepository(database)
+	repo := NewRepository(database, t.TempDir())
 
 	cam1 := insertDetTestCamera(t, database, "cam1")
 	old := time.Now().AddDate(0, 0, -10)
@@ -73,7 +73,7 @@ func TestDeleteOlderThan_BasicDelete(t *testing.T) {
 
 func TestDeleteOlderThan_ExcludesCameraIDs(t *testing.T) {
 	database := openDetTestDB(t)
-	repo := NewRepository(database)
+	repo := NewRepository(database, t.TempDir())
 
 	cam1 := insertDetTestCamera(t, database, "cam1")
 	cam2 := insertDetTestCamera(t, database, "cam2")
@@ -103,7 +103,7 @@ func TestDeleteOlderThan_ExcludesCameraIDs(t *testing.T) {
 
 func TestDeleteOlderThan_NullCameraID_PreservedByExclusion(t *testing.T) {
 	database := openDetTestDB(t)
-	repo := NewRepository(database)
+	repo := NewRepository(database, t.TempDir())
 
 	cam1 := insertDetTestCamera(t, database, "cam1")
 	old := time.Now().AddDate(0, 0, -10)
@@ -152,7 +152,7 @@ func TestDeleteOlderThan_NullCameraID_PreservedByExclusion(t *testing.T) {
 
 func TestDeleteOlderThan_EmptyExcludeList_DeletesAll(t *testing.T) {
 	database := openDetTestDB(t)
-	repo := NewRepository(database)
+	repo := NewRepository(database, t.TempDir())
 
 	cam1 := insertDetTestCamera(t, database, "cam1")
 	old := time.Now().AddDate(0, 0, -10)
@@ -172,7 +172,7 @@ func TestDeleteOlderThan_EmptyExcludeList_DeletesAll(t *testing.T) {
 
 func TestDeleteOlderThan_SpecificCamera(t *testing.T) {
 	database := openDetTestDB(t)
-	repo := NewRepository(database)
+	repo := NewRepository(database, t.TempDir())
 
 	cam1 := insertDetTestCamera(t, database, "cam1")
 	cam2 := insertDetTestCamera(t, database, "cam2")
@@ -200,7 +200,7 @@ func TestDeleteOlderThan_SpecificCamera(t *testing.T) {
 
 func TestDeleteOlderThan_RespectsLimit(t *testing.T) {
 	database := openDetTestDB(t)
-	repo := NewRepository(database)
+	repo := NewRepository(database, t.TempDir())
 
 	cam1 := insertDetTestCamera(t, database, "cam1")
 	old := time.Now().AddDate(0, 0, -10)
@@ -227,7 +227,7 @@ func TestDeleteOlderThan_RespectsLimit(t *testing.T) {
 
 func TestDeleteOlderThan_FiltersByEventType(t *testing.T) {
 	database := openDetTestDB(t)
-	repo := NewRepository(database)
+	repo := NewRepository(database, t.TempDir())
 
 	cam1 := insertDetTestCamera(t, database, "cam1")
 	old := time.Now().AddDate(0, 0, -10)

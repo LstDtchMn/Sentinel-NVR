@@ -82,6 +82,7 @@ func TestRedactStreamURL(t *testing.T) {
 	}
 }
 
+// TODO(review): L17 — replace with strings.Contains (edge-case difference on empty substr)
 func contains(s, substr string) bool {
 	return len(substr) > 0 && len(s) >= len(substr) && containsHelper(s, substr)
 }

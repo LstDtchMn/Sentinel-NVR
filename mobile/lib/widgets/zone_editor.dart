@@ -82,15 +82,9 @@ class _ZoneEditorState extends State<ZoneEditor> {
     setState(() => _saving = true);
     try {
       final api = context.read<ApiClient>();
-      await api.updateCamera(widget.camera.name, {
-        'name': widget.camera.name,
-        'enabled': widget.camera.enabled,
-        'main_stream': widget.camera.mainStream,
-        if (widget.camera.subStream != null) 'sub_stream': widget.camera.subStream,
-        'record': widget.camera.record,
-        'detect': widget.camera.detect,
-        'zones': _zones.map((z) => z.toJson()).toList(),
-      });
+      final body = widget.camera.toJson();
+      body['zones'] = _zones.map((z) => z.toJson()).toList();
+      await api.updateCamera(widget.camera.name, body);
       widget.onSave(_zones);
     } catch (e) {
       if (mounted) setState(() => _error = 'Save failed: $e');

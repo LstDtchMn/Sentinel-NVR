@@ -78,6 +78,7 @@ export default function DatePicker({
   return (
     <div ref={ref} className="relative">
       {/* Trigger button */}
+      {/* TODO(review): L7 — add aria-expanded, aria-haspopup, Escape-to-close, keyboard navigation */}
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-2 bg-surface-base border border-border rounded-lg

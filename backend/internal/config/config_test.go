@@ -54,11 +54,11 @@ func TestSetDefaults(t *testing.T) {
 	if cfg.Auth.RefreshTokenTTL != 604800 {
 		t.Errorf("Auth.RefreshTokenTTL = %d, want 604800", cfg.Auth.RefreshTokenTTL)
 	}
-	if cfg.Detection.FaceRecognition.MatchThreshold != 0.6 {
-		t.Errorf("FaceRecognition.MatchThreshold = %f, want 0.6", cfg.Detection.FaceRecognition.MatchThreshold)
+	if cfg.Detection.FaceRecognition.MatchThreshold == nil || *cfg.Detection.FaceRecognition.MatchThreshold != 0.6 {
+		t.Errorf("FaceRecognition.MatchThreshold = %v, want 0.6", cfg.Detection.FaceRecognition.MatchThreshold)
 	}
-	if cfg.Detection.AudioClassification.ConfidenceThreshold != 0.7 {
-		t.Errorf("AudioClassification.ConfidenceThreshold = %f, want 0.7", cfg.Detection.AudioClassification.ConfidenceThreshold)
+	if cfg.Detection.AudioClassification.ConfidenceThreshold == nil || *cfg.Detection.AudioClassification.ConfidenceThreshold != 0.7 {
+		t.Errorf("AudioClassification.ConfidenceThreshold = %v, want 0.7", cfg.Detection.AudioClassification.ConfidenceThreshold)
 	}
 	if cfg.Detection.AudioClassification.SampleInterval != 3 {
 		t.Errorf("AudioClassification.SampleInterval = %d, want 3", cfg.Detection.AudioClassification.SampleInterval)

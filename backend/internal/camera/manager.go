@@ -352,15 +352,20 @@ func (m *Manager) UpdateCamera(ctx context.Context, name string, cam *CameraReco
 	needsRestart := streamChanged || enabledChanged || recordChanged || detectChanged || zonesChanged
 
 	if needsRestart {
-		// Stop old pipeline if running
+		// Capture and remove the old pipeline under lock, then stop it outside
+		// the lock to avoid holding the write lock during the blocking Stop() call
+		// (which can take ~5s waiting for ffmpeg to exit).
 		m.mu.Lock()
 		var oldPipeline *Pipeline
 		if pipeline, exists := m.cameras[name]; exists {
-			pipeline.Stop()
 			delete(m.cameras, name)
 			oldPipeline = pipeline
 		}
 		m.mu.Unlock()
+
+		if oldPipeline != nil {
+			oldPipeline.Stop()
+		}
 
 		// Wait for old pipeline goroutine to fully exit before starting new one,
 		// preventing two ffmpeg processes writing to the same camera's directory.
@@ -442,15 +447,19 @@ func (m *Manager) RemoveCamera(ctx context.Context, name string) error {
 		return err
 	}
 
-	// Stop pipeline
+	// Capture and remove the pipeline under lock, then stop it outside the lock
+	// to avoid holding the write lock during the blocking Stop() call.
 	m.mu.Lock()
 	var oldPipeline *Pipeline
 	if pipeline, exists := m.cameras[name]; exists {
-		pipeline.Stop()
 		delete(m.cameras, name)
 		oldPipeline = pipeline
 	}
 	m.mu.Unlock()
+
+	if oldPipeline != nil {
+		oldPipeline.Stop()
+	}
 
 	// Wait for pipeline goroutine to fully exit. Uses the request context (unlike
 	// UpdateCamera which uses a background timeout) because cancellation here is
