@@ -128,6 +128,27 @@ export default function Events() {
     [],
   );
 
+  // Re-fetch current page when the browser tab becomes visible again.
+  // SSE EventSource auto-reconnects but events emitted while the tab was
+  // backgrounded are missed — this ensures the list is fresh on tab return.
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        const ctrl = new AbortController();
+        const params: EventListParams = {
+          ...filtersRef.current,
+          offset: 0,
+        };
+        offsetRef.current = PAGE_SIZE;
+        loadEvents(params, false, ctrl.signal);
+        // No cleanup for ctrl — the request is fire-and-forget; if filters
+        // change before it resolves, the filter effect's abort handles it.
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [loadEvents]);
+
   // Reload from scratch whenever filters change.
   useEffect(() => {
     const ctrl = new AbortController();

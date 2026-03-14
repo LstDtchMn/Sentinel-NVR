@@ -25,7 +25,7 @@ GoRouter buildRouter(AuthService auth) {
     refreshListenable: auth, // re-evaluate redirect on every notifyListeners()
     initialLocation: '/live',
     // Redirect guard — state machine with four ordered rules:
-    //   1. isLoading → null (stay put; auth state is still initialising)
+    //   1. isLoading → /splash (show splash screen while auth state initialises)
     //   2. needsSetup → /setup (first-run: no users exist yet)
     //   3. !isLoggedIn && non-auth route → /login (unauthenticated → login)
     //   4. isLoggedIn && auth route → /live (already logged in → main app)
@@ -36,13 +36,17 @@ GoRouter buildRouter(AuthService auth) {
       final loc = state.matchedLocation;
       final isAuthRoute = loc == '/login' || loc == '/setup' || loc == '/qr-scan';
 
-      if (isLoading) return null;                              // 1. still initialising
+      if (isLoading) return loc == '/splash' ? null : '/splash'; // 1. still initialising
+      if (loc == '/splash') {                                    // 1b. loading done, leave splash
+        return auth.needsSetup ? '/setup' : (isLoggedIn ? '/live' : '/login');
+      }
       if (auth.needsSetup && loc != '/setup') return '/setup'; // 2. first-run setup
       if (!isLoggedIn && !isAuthRoute) return '/login';        // 3. unauthenticated
       if (isLoggedIn && isAuthRoute) return '/live';           // 4. already logged in
       return null;
     },
     routes: [
+      GoRoute(path: '/splash', builder: (_, __) => const _SplashScreen()),
       GoRoute(path: '/login', builder: (_, __) => const LoginScreen()),
       GoRoute(path: '/setup', builder: (_, __) => const SetupScreen()),
       GoRoute(path: '/qr-scan', builder: (_, __) => const QrScanScreen()),
@@ -190,6 +194,37 @@ class _ScaffoldWithNav extends StatelessWidget {
             label: 'Settings',
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Splash screen shown while auth state is still loading.  Prevents the user
+/// from briefly seeing the live-view shell before being redirected to /login.
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Color(0xFF0D1117),
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Color(0xFF58A6FF)),
+            SizedBox(height: 24),
+            Text(
+              'Sentinel NVR',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

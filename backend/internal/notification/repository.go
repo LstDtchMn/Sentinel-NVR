@@ -102,6 +102,34 @@ func (r *Repository) ListTokensByUser(ctx context.Context, userID int) ([]TokenR
 	return tokens, rows.Err()
 }
 
+// GetTokenByID retrieves a single token by its primary key and owning user.
+// Returns ErrNotFound if the row does not exist or belongs to a different user.
+func (r *Repository) GetTokenByID(ctx context.Context, id, userID int) (*TokenRecord, error) {
+	rec := &TokenRecord{}
+	var createdAt, updatedAt string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, user_id, token, provider, label, created_at, updated_at
+		 FROM notification_tokens WHERE id=? AND user_id=?`,
+		id, userID,
+	).Scan(&rec.ID, &rec.UserID, &rec.Token, &rec.Provider, &rec.Label, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var parseErr error
+	rec.CreatedAt, parseErr = dbutil.ParseSQLiteTime(createdAt)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", parseErr)
+	}
+	rec.UpdatedAt, parseErr = dbutil.ParseSQLiteTime(updatedAt)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", parseErr)
+	}
+	return rec, nil
+}
+
 // DeleteToken removes a token by (id, userID). Returns ErrNotFound if the row
 // does not exist or belongs to a different user.
 func (r *Repository) DeleteToken(ctx context.Context, id, userID int) error {

@@ -4,7 +4,7 @@
  * Run with: npm test (vitest run)
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
 // These are pure type-level checks — ensure the module exports the expected shapes.
 import type {
@@ -12,9 +12,7 @@ import type {
   EventRecord,
   EventsResponse,
   HeatmapBucket,
-  RecordingSegment,
   RetentionRule,
-  NotifToken,
   NotifPref,
 } from "./client";
 

@@ -163,7 +163,7 @@ export default function NotificationSettings() {
         <div className="space-y-8">
           {/* ── Device Tokens ─────────────────────────────────────────── */}
           <section>
-            <h2 className="text-lg font-medium mb-4">Device Tokens</h2>
+            <h2 className="text-lg font-medium mb-4">Notification Channels</h2>
 
             {/* Registered token list */}
             {tokens.length > 0 ? (
@@ -203,7 +203,7 @@ export default function NotificationSettings() {
               onSubmit={handleAddToken}
               className="bg-surface-raised border border-border rounded-lg p-4 space-y-3"
             >
-              <h3 className="text-sm font-medium text-muted">Register a new token</h3>
+              <h3 className="text-sm font-medium text-muted">Add notification channel</h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <select
                   value={newProvider}
@@ -240,14 +240,14 @@ export default function NotificationSettings() {
                            rounded text-sm font-medium transition-colors"
               >
                 <Plus className="w-4 h-4" />
-                {savingToken ? "Registering…" : "Register Token"}
+                {savingToken ? "Adding…" : "Add Channel"}
               </button>
             </form>
           </section>
 
           {/* ── Notification Preferences ───────────────────────────────── */}
           <section>
-            <h2 className="text-lg font-medium mb-4">Alert Preferences</h2>
+            <h2 className="text-lg font-medium mb-4">Alert Rules</h2>
 
             {prefs.length > 0 ? (
               <div className="space-y-2 mb-4">
@@ -297,7 +297,7 @@ export default function NotificationSettings() {
               onSubmit={handleAddPref}
               className="bg-surface-raised border border-border rounded-lg p-4 space-y-3"
             >
-              <h3 className="text-sm font-medium text-muted">Add or update a preference</h3>
+              <h3 className="text-sm font-medium text-muted">Add or update a rule</h3>
               <select
                 value={newEventType}
                 onChange={(e) => setNewEventType(e.target.value)}
@@ -335,7 +335,7 @@ export default function NotificationSettings() {
                            rounded text-sm font-medium transition-colors"
               >
                 <Plus className="w-4 h-4" />
-                {savingPref ? "Saving…" : "Save Preference"}
+                {savingPref ? "Saving…" : "Save Rule"}
               </button>
             </form>
           </section>

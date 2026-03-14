@@ -10,7 +10,7 @@
  * so that timeline click-to-seek works across segment boundaries (R6).
  */
 import { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle } from "react";
-import { Film } from "lucide-react";
+import { Film, Download } from "lucide-react";
 import { api, type TimelineSegment } from "../../api/client";
 import { formatWallClock } from "../../utils/time";
 import PlaybackControls from "./PlaybackControls";
@@ -252,19 +252,29 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
 
       {/* Controls bar */}
       {segment && (
-        <div className="bg-surface-raised border-t border-border px-4 py-2">
-          <PlaybackControls
-            playing={playing}
-            playbackRate={playbackRate}
-            currentTimeDisplay={wallClock}
-            segmentTimeDisplay={segmentTimeDisplay}
-            onPlayPause={handlePlayPause}
-            onSkipPrev={handleSkipPrev}
-            onSkipNext={handleSkipNext}
-            onSpeedChange={onPlaybackRateChange}
-            hasPrev={hasPrev}
-            hasNext={hasNext}
-          />
+        <div className="bg-surface-raised border-t border-border px-4 py-2 flex items-center gap-2">
+          <div className="flex-1 min-w-0">
+            <PlaybackControls
+              playing={playing}
+              playbackRate={playbackRate}
+              currentTimeDisplay={wallClock}
+              segmentTimeDisplay={segmentTimeDisplay}
+              onPlayPause={handlePlayPause}
+              onSkipPrev={handleSkipPrev}
+              onSkipNext={handleSkipNext}
+              onSpeedChange={onPlaybackRateChange}
+              hasPrev={hasPrev}
+              hasNext={hasNext}
+            />
+          </div>
+          <a
+            href={api.recordingPlayURL(segment.id)}
+            download
+            className="p-1.5 rounded hover:bg-white/10 transition-colors shrink-0"
+            title="Download segment"
+          >
+            <Download className="w-4 h-4" />
+          </a>
         </div>
       )}
     </div>

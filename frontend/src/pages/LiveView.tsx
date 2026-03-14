@@ -5,6 +5,7 @@
  * Press Escape or click the focused tile to return to grid view.
  */
 import { useEffect, useRef, useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { api, CameraDetail, CameraState } from "../api/client";
 import { Video, Maximize2, Minimize2 } from "lucide-react";
 import VideoPlayer from "../components/VideoPlayer";
@@ -127,7 +128,11 @@ export default function LiveView() {
           <Video className="w-12 h-12 text-faint mb-4" />
           <p className="text-muted">No cameras to display</p>
           <p className="text-sm text-faint mt-1">
-            Add cameras on the Cameras page to see live video here
+            Add cameras on the{" "}
+            <Link to="/cameras" className="text-sentinel-500 hover:underline">
+              Cameras page
+            </Link>{" "}
+            to see live video here
           </p>
         </div>
       )}
@@ -164,10 +169,10 @@ export default function LiveView() {
 /** Returns Tailwind grid classes based on camera count. */
 function getGridClass(count: number): string {
   if (count <= 1) return "grid grid-cols-1";
-  if (count <= 2) return "grid grid-cols-2";
-  if (count <= 4) return "grid grid-cols-2";
-  if (count <= 9) return "grid grid-cols-3";
-  return "grid grid-cols-4";
+  if (count <= 2) return "grid grid-cols-1 sm:grid-cols-2";
+  if (count <= 4) return "grid grid-cols-1 sm:grid-cols-2";
+  if (count <= 9) return "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3";
+  return "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4";
 }
 
 /** Camera tile in the grid — video player with overlay controls. */
@@ -186,7 +191,7 @@ function CameraTile({
 
   return (
     <div
-      className="relative bg-surface-raised border border-border rounded-lg overflow-hidden cursor-pointer group aspect-video"
+      className={`relative bg-surface-raised border ${state === "error" ? "border-status-error" : "border-border"} rounded-lg overflow-hidden cursor-pointer group aspect-video`}
       onClick={onFocus}
     >
       {isStreamable ? (
@@ -295,7 +300,7 @@ function StatusDot({ state }: { state: CameraState }) {
 
   return (
     <span
-      className={`inline-block w-2 h-2 rounded-full ${colorClass}`}
+      className={`inline-block w-2.5 h-2.5 rounded-full ${colorClass}`}
       title={state}
     />
   );

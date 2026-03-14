@@ -13,6 +13,7 @@ import Sidebar from "./components/Sidebar";
 import LiveView from "./pages/LiveView";
 import Playback from "./pages/Playback";
 import Events from "./pages/Events";
+import EventDetail from "./pages/EventDetail";
 import Dashboard from "./pages/Dashboard";
 import Cameras from "./pages/Cameras";
 import Settings from "./pages/Settings";
@@ -60,6 +61,7 @@ function AppShell() {
             <Route path="/live" element={<LiveView />} />
             <Route path="/playback" element={<Playback />} />
             <Route path="/events" element={<Events />} />
+            <Route path="/events/:id" element={<EventDetail />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/cameras" element={<Cameras />} />
             <Route path="/cameras/:name/zones" element={<ZoneEditor />} />

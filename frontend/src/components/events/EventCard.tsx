@@ -3,6 +3,7 @@
  * Shows thumbnail, timestamp, event type, label, confidence, and a delete button.
  */
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { Trash2, ImageOff, ShieldAlert, Camera, User, Volume2 } from "lucide-react";
 import { api, EventRecord } from "../../api/client";
 
@@ -47,7 +48,11 @@ export default function EventCard({ event, onDelete }: Props) {
   }
 
   return (
-    <div className="group relative bg-surface-raised border border-border rounded-lg overflow-hidden flex flex-col">
+    <Link
+      to={`/events/${event.id}`}
+      className="group relative bg-surface-raised border border-border rounded-lg overflow-hidden flex flex-col
+                 hover:border-sentinel-500/50 transition-colors"
+    >
       {/* Thumbnail */}
       <div className="aspect-video bg-surface-overlay flex items-center justify-center relative">
         {hasThumbnail ? (
@@ -63,7 +68,7 @@ export default function EventCard({ event, onDelete }: Props) {
 
         {/* Delete overlay on hover */}
         <button
-          onClick={handleDelete}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDelete(); }}
           disabled={deleting}
           className="absolute top-2 right-2 p-1.5 rounded-md bg-surface-base/80 text-faint
                      opacity-0 group-hover:opacity-100 transition-opacity
@@ -102,6 +107,6 @@ export default function EventCard({ event, onDelete }: Props) {
         {/* Timestamp */}
         <p className="text-xs text-faint">{formatTime(event.start_time)}</p>
       </div>
-    </div>
+    </Link>
   );
 }

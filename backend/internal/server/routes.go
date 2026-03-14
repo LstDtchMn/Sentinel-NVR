@@ -105,6 +105,9 @@ func (s *Server) registerRoutes() {
 		protected.PUT("/cameras/:name", s.handleUpdateCamera)
 		protected.DELETE("/cameras/:name", s.handleDeleteCamera)
 
+		// Test camera stream connectivity
+		protected.POST("/cameras/test-stream", s.handleTestStream)
+
 		// Live streaming (Phase 3) — WebSocket proxy to go2rtc MSE
 		protected.GET("/streams/:name/ws", s.handleStreamWS)
 
@@ -143,6 +146,7 @@ func (s *Server) registerRoutes() {
 			notif.PUT("/prefs", s.handleUpsertNotifPref)
 			notif.DELETE("/prefs/:id", s.handleDeleteNotifPref)
 			notif.GET("/log", s.handleListNotifLog)
+			notif.POST("/test", s.handleTestNotification)
 		}
 
 		// Retention rules management (R14) — per-camera × per-event-type matrix
@@ -1909,6 +1913,124 @@ func (s *Server) handleListNotifLog(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, logs)
+}
+
+// handleTestNotification sends a test notification to a registered device token.
+// POST /api/v1/notifications/test
+// Body: {"token_id": <int>}
+func (s *Server) handleTestNotification(c *gin.Context) {
+	if !s.notifAvailable(c) {
+		return
+	}
+	var req struct {
+		TokenID int `json:"token_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token_id is required"})
+		return
+	}
+
+	userID := s.notifUserID(c)
+	if userID < 0 {
+		return // notifUserID already aborted with 500
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	// Look up the token — scoped to the current user to prevent cross-user abuse.
+	tok, err := s.notifRepo.GetTokenByID(ctx, req.TokenID, userID)
+	if errors.Is(err, notification.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "token not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to look up notification token", "token_id", req.TokenID, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	sender, ok := s.notifSenders[tok.Provider]
+	if !ok {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": fmt.Sprintf("no sender configured for provider %q", tok.Provider)})
+		return
+	}
+
+	testNotif := notification.Notification{
+		Title:     "Sentinel NVR Test",
+		Body:      "This is a test notification. If you see this, notifications are working!",
+		EventType: "test",
+		Timestamp: time.Now(),
+	}
+
+	if err := sender.Send(ctx, tok.Token, testNotif); err != nil {
+		s.logger.Warn("test notification delivery failed", "provider", tok.Provider, "token_id", tok.ID, "error", err)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": fmt.Sprintf("delivery failed: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "sent"})
+}
+
+// handleTestStream tests whether a stream URL is reachable via go2rtc.
+// POST /api/v1/cameras/test-stream
+// Body: {"url": "<stream_url>"}
+func (s *Server) handleTestStream(c *gin.Context) {
+	var req struct {
+		URL string `json:"url" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "url is required"})
+		return
+	}
+
+	// Validate URL scheme.
+	parsed, err := url.Parse(req.URL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid URL"})
+		return
+	}
+	switch parsed.Scheme {
+	case "rtsp", "rtsps", "rtmp", "http", "https":
+		// valid
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "url scheme must be rtsp, rtsps, rtmp, http, or https"})
+		return
+	}
+
+	// Generate a unique temporary stream name.
+	randBytes := make([]byte, 8)
+	if _, err := rand.Read(randBytes); err != nil {
+		s.logger.Error("failed to generate random bytes for test stream", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	testName := "__test_" + hex.EncodeToString(randBytes)
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	// Add the test stream to go2rtc.
+	if err := s.g2r.AddStream(ctx, testName, req.URL); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": fmt.Sprintf("stream unreachable: %v", err)})
+		return
+	}
+	// Always clean up the test stream, even on failure.
+	defer func() {
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanCancel()
+		if err := s.g2r.RemoveStream(cleanCtx, testName); err != nil {
+			s.logger.Warn("failed to remove test stream from go2rtc", "name", testName, "error", err)
+		}
+	}()
+
+	// Try to grab a JPEG frame to verify the stream is actually producing video.
+	if _, err := s.g2r.FrameJPEG(ctx, testName); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": fmt.Sprintf("stream unreachable: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Stream is reachable"})
 }
 
 // ─── Remote access handlers (Phase 12, CG11, R8) ────────────────────────────

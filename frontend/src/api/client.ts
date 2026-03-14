@@ -415,7 +415,7 @@ class ApiClient {
   }
 
   getHealth(signal?: AbortSignal): Promise<HealthStatus> {
-    return this.request<HealthStatus>("/health", { signal });
+    return this.request<HealthStatus>("/admin/health", { signal });
   }
 
   getCameras(signal?: AbortSignal): Promise<CameraDetail[]> {

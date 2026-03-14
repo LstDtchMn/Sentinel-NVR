@@ -221,8 +221,8 @@ func main() {
 	// notifications.enabled) so that tokens and prefs can be pre-registered before enabling delivery.
 	notifRepo := notification.NewRepository(database)
 	var notifService *notification.Service
+	notifSenders := map[string]notification.Sender{} // shared with server for test endpoint
 	if cfg.Notifications.Enabled {
-		senders := map[string]notification.Sender{}
 
 		// FCM sender: requires a Google service account JSON file.
 		if cfg.Notifications.FCM.ServiceAccountJSON != "" {
@@ -231,7 +231,7 @@ func main() {
 				logger.Error("failed to initialize FCM sender", "error", err)
 				os.Exit(1)
 			}
-			senders["fcm"] = fcmSender
+			notifSenders["fcm"] = fcmSender
 			logger.Info("FCM sender initialized")
 		}
 
@@ -244,19 +244,19 @@ func main() {
 				logger.Error("failed to initialize APNs sender", "error", err)
 				os.Exit(1)
 			}
-			senders["apns"] = apnsSender
+			notifSenders["apns"] = apnsSender
 			logger.Info("APNs sender initialized", "sandbox", apns.Sandbox)
 		}
 
 		// Webhook sender is always available; no credential file required.
-		senders["webhook"] = notification.NewWebhookSender()
+		notifSenders["webhook"] = notification.NewWebhookSender()
 
-		notifService = notification.NewService(notifRepo, senders, bus, logger)
+		notifService = notification.NewService(notifRepo, notifSenders, bus, logger)
 		notifService.Start()
 		logger.Info("notification service started",
 			"providers", func() []string {
-				p := make([]string, 0, len(senders))
-				for k := range senders {
+				p := make([]string, 0, len(notifSenders))
+				for k := range notifSenders {
 					p = append(p, k)
 				}
 				return p
@@ -338,7 +338,7 @@ func main() {
 
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, modelMgr, g2rClient, bus, notifRepo, logger)
+	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, modelMgr, g2rClient, bus, notifRepo, notifSenders, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err

@@ -100,7 +100,7 @@ export default function Dashboard() {
           />
           <StatCard
             icon={Radio}
-            label="go2rtc"
+            label="Streaming Engine"
             value={health.go2rtc}
             color={health.go2rtc === "connected" ? "green" : "red"}
           />

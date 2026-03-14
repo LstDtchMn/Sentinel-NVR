@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { api, SystemConfig, StorageStats, PairingCode, RetentionRule, CameraDetail } from "../api/client";
+import { api, SystemConfig, StorageStats, RetentionRule, CameraDetail } from "../api/client";
 import { Settings as SettingsIcon } from "lucide-react";
 
 /** Format bytes as human-readable string (GiB / MiB / KiB). */
@@ -516,8 +516,11 @@ export default function Settings() {
         {/* Remote Access — QR pairing for mobile app (Phase 12, CG11) */}
         <section className="bg-surface-raised border border-border rounded-lg p-5">
           <h2 className="text-sm font-medium text-muted mb-4">Remote Access</h2>
+          <p className="text-sm text-muted mb-4">
+            Generate a one-time QR code for the Sentinel NVR mobile app. Your phone connects
+            securely through a relay server — no port forwarding or VPN needed.
+          </p>
           <p className="text-xs text-faint mb-4">
-            Generate a QR code to pair the Sentinel NVR mobile app.
             The code expires after 15 minutes and can only be used once.
           </p>
 
