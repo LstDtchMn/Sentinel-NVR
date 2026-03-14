@@ -298,8 +298,15 @@ func buildNotification(event eventbus.Event) Notification {
 			label = "object"
 		}
 		pct := int(event.Confidence * 100)
-		title = fmt.Sprintf("Detection: %s", label)
-		body = fmt.Sprintf("Detected %s (%d%% confidence)", label, pct)
+		// Use event.CameraName directly (not the fallback cameraName which may
+		// equal Label for detection events, producing "person on person").
+		if event.CameraName != "" {
+			title = fmt.Sprintf("Detection: %s on %s", label, event.CameraName)
+			body = fmt.Sprintf("Detected %s (%d%%) on %s", label, pct, event.CameraName)
+		} else {
+			title = fmt.Sprintf("Detection: %s", label)
+			body = fmt.Sprintf("Detected %s (%d%% confidence)", label, pct)
+		}
 	case "camera.offline", "camera.disconnected":
 		title = "Camera Offline"
 		body = fmt.Sprintf("Camera %q has gone offline", cameraName)

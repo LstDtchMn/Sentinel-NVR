@@ -32,6 +32,7 @@ export default function Events() {
   const [filterCamera, setFilterCamera] = useState<number | "">("");
   const [filterType, setFilterType] = useState("");
   const [filterDate, setFilterDate] = useState("");
+  const [filterMinConfidence, setFilterMinConfidence] = useState<number | "">("");
 
   // SSE connection state for the live indicator (Phase 6, CG8)
   const [liveConnected, setLiveConnected] = useState(false);
@@ -73,6 +74,7 @@ export default function Events() {
         if (f.camera_id !== undefined && event.camera_id !== f.camera_id) return;
         if (f.type && event.type !== f.type) return;
         if (f.date && event.start_time.slice(0, 10) !== f.date) return;
+        if (f.min_confidence !== undefined && event.confidence < f.min_confidence) return;
         // Prepend to list and bump total.
         setTotal((t) => t + 1);
         setEvents((prev) => [event, ...prev]);
@@ -158,12 +160,13 @@ export default function Events() {
       ...(filterCamera !== "" && { camera_id: filterCamera }),
       ...(filterType && { type: filterType }),
       ...(filterDate && { date: filterDate }),
+      ...(filterMinConfidence !== "" && { min_confidence: filterMinConfidence }),
     };
     offsetRef.current = PAGE_SIZE;
     filtersRef.current = params;
     loadEvents(params, false, ctrl.signal);
     return () => ctrl.abort();
-  }, [filterCamera, filterType, filterDate, loadEvents]);
+  }, [filterCamera, filterType, filterDate, filterMinConfidence, loadEvents]);
 
   function handleLoadMore() {
     loadMoreCtrlRef.current?.abort(); // cancel any in-flight load-more before starting a new one
@@ -260,12 +263,30 @@ export default function Events() {
           Today
         </button>
 
-        {(filterCamera !== "" || filterType || filterDate) && (
+        {/* Min confidence */}
+        <select
+          value={filterMinConfidence}
+          onChange={(e) =>
+            setFilterMinConfidence(e.target.value === "" ? "" : Number(e.target.value))
+          }
+          aria-label="Filter by minimum confidence"
+          className="bg-surface-raised border border-border rounded-lg px-3 py-2 text-sm
+                     text-white focus:outline-none focus:ring-1 focus:ring-sentinel-500"
+        >
+          <option value="">Any confidence</option>
+          <option value="0.5">&gt; 50%</option>
+          <option value="0.7">&gt; 70%</option>
+          <option value="0.8">&gt; 80%</option>
+          <option value="0.9">&gt; 90%</option>
+        </select>
+
+        {(filterCamera !== "" || filterType || filterDate || filterMinConfidence !== "") && (
           <button
             onClick={() => {
               setFilterCamera("");
               setFilterType("");
               setFilterDate("");
+              setFilterMinConfidence("");
             }}
             className="text-sm text-muted hover:text-white px-3 py-2 rounded-lg
                        hover:bg-surface-overlay transition-colors"
@@ -288,7 +309,7 @@ export default function Events() {
         <div className="flex-1 flex flex-col items-center justify-center gap-3">
           <Activity className="w-12 h-12 text-faint" />
           <p className="text-muted">No events found</p>
-          {(filterCamera !== "" || filterType || filterDate) && (
+          {(filterCamera !== "" || filterType || filterDate || filterMinConfidence !== "") && (
             <p className="text-sm text-faint">
               Try adjusting your filters or clearing them to see all events.
             </p>

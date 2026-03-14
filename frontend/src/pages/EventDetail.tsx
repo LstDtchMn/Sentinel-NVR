@@ -13,7 +13,7 @@ import {
   Film,
   ImageOff,
 } from "lucide-react";
-import { api, type EventRecord } from "../api/client";
+import { api, type EventRecord, type CameraDetail } from "../api/client";
 
 function confidenceColor(c: number): string {
   if (c >= 0.8) return "bg-green-500/20 text-green-400";
@@ -74,6 +74,23 @@ export default function EventDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [imgError, setImgError] = useState(false);
+  const [cameras, setCameras] = useState<CameraDetail[]>([]);
+
+  // Fetch cameras on mount to resolve camera_id → camera name for "Jump to Recording"
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .getCameras(ctrl.signal)
+      .then((data) => {
+        if (ctrl.signal.aborted) return;
+        setCameras(data);
+      })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        // Non-critical — camera lookup just won't work
+      });
+    return () => ctrl.abort();
+  }, []);
 
   useEffect(() => {
     if (!id) return;
@@ -204,16 +221,29 @@ export default function EventDetail() {
         </dl>
 
         {/* Jump to Recording link */}
-        {event.has_clip && (
-          <Link
-            to="/playback"
-            className="flex items-center gap-2 text-sm text-sentinel-400 hover:text-sentinel-300
-                       transition-colors w-fit mt-2"
-          >
-            <Film className="w-4 h-4" />
-            Jump to Recording
-          </Link>
-        )}
+        {event.has_clip && (() => {
+          const cam = event.camera_id !== null
+            ? cameras.find((c) => c.id === event.camera_id)
+            : undefined;
+          const cameraName = cam?.name;
+          const startDate = new Date(event.start_time);
+          const dateStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-${String(startDate.getDate()).padStart(2, "0")}`;
+          const secondsSinceMidnight = startDate.getHours() * 3600 + startDate.getMinutes() * 60 + startDate.getSeconds();
+          const params = new URLSearchParams();
+          if (cameraName) params.set("camera", cameraName);
+          params.set("date", dateStr);
+          params.set("time", String(secondsSinceMidnight));
+          return (
+            <Link
+              to={`/playback?${params.toString()}`}
+              className="flex items-center gap-2 text-sm text-sentinel-400 hover:text-sentinel-300
+                         transition-colors w-fit mt-2"
+            >
+              <Film className="w-4 h-4" />
+              Jump to Recording
+            </Link>
+          );
+        })()}
       </div>
     </div>
   );

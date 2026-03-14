@@ -4,6 +4,8 @@
  * and playing back segments with seek, speed control, and auto-advance.
  */
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { api, type CameraDetail, type TimelineSegment, type HeatmapBucket } from "../api/client";
 import { todayDateString, currentMonthString, isoToSecondsSinceMidnight } from "../utils/time";
 import CameraSelector from "../components/playback/CameraSelector";
@@ -46,6 +48,36 @@ export default function Playback() {
 
   // Ref to the player for imperative seek on timeline click (R6).
   const playerRef = useRef<RecordingPlayerHandle | null>(null);
+
+  // URL query params for deep-link from EventDetail "Jump to Recording"
+  const [searchParams] = useSearchParams();
+  // Pending seek from URL params — consumed once after segments load
+  const pendingUrlSeekRef = useRef<number | null>(null);
+
+  // Apply URL query params on mount (camera, date, time)
+  useEffect(() => {
+    const cameraParam = searchParams.get("camera");
+    const dateParam = searchParams.get("date");
+    const timeParam = searchParams.get("time");
+
+    if (cameraParam) {
+      setSelectedCamera(cameraParam);
+    }
+    if (dateParam) {
+      setSelectedDate(dateParam);
+      // Sync calendar display month
+      const parts = dateParam.split("-");
+      if (parts.length >= 2) {
+        setDisplayMonth(`${parts[0]}-${parts[1]}`);
+      }
+    }
+    if (timeParam) {
+      pendingUrlSeekRef.current = Number(timeParam);
+    }
+    // Only run once on mount — searchParams identity changes on every render
+    // but we only want the initial URL values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Fetch cameras on mount
   useEffect(() => {
@@ -150,6 +182,21 @@ export default function Playback() {
     setCurrentTime(null);
   }, []);
 
+  // Prev/next day navigation helpers
+  const shiftDate = useCallback(
+    (days: number) => {
+      const d = new Date(selectedDate + "T00:00:00");
+      d.setDate(d.getDate() + days);
+      const shifted = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      handleDateSelect(shifted);
+      // Sync calendar display month when navigating across month boundary
+      setDisplayMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+    },
+    [selectedDate, handleDateSelect],
+  );
+
+  const isToday = selectedDate === todayDateString();
+
   // Timeline seek handler — find segment at the clicked time and seek the player (R6).
   // For same-segment seeks, calls seekTo() directly on the loaded video.
   // For cross-segment seeks, calls setInitialSeek() before changing activeSegment so
@@ -199,6 +246,15 @@ export default function Playback() {
     [segments],
   );
 
+  // When segments load with a pending URL seek, trigger the seek
+  useEffect(() => {
+    if (segments.length > 0 && pendingUrlSeekRef.current !== null) {
+      const seekTime = pendingUrlSeekRef.current;
+      pendingUrlSeekRef.current = null;
+      handleTimelineSeek(seekTime);
+    }
+  }, [segments, handleTimelineSeek]);
+
   // Video time update — convert to seconds since midnight for timeline playhead
   const handleTimeUpdate = useCallback((videoCurrentTime: number) => {
     const seg = activeSegmentRef.current;
@@ -243,6 +299,17 @@ export default function Playback() {
           selected={selectedCamera}
           onSelect={handleCameraSelect}
         />
+        <button
+          type="button"
+          onClick={() => shiftDate(-1)}
+          className="p-1.5 rounded-lg bg-surface-base border border-border text-muted
+                     hover:text-white hover:border-sentinel-500/50 transition-colors
+                     focus:outline-none focus:ring-1 focus:ring-sentinel-500"
+          aria-label="Previous day"
+          title="Previous day"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
         <DatePicker
           selectedDate={selectedDate}
           availableDays={availableDays}
@@ -250,6 +317,19 @@ export default function Playback() {
           onDateSelect={handleDateSelect}
           onMonthChange={setDisplayMonth}
         />
+        <button
+          type="button"
+          onClick={() => shiftDate(1)}
+          disabled={isToday}
+          className="p-1.5 rounded-lg bg-surface-base border border-border text-muted
+                     hover:text-white hover:border-sentinel-500/50 transition-colors
+                     focus:outline-none focus:ring-1 focus:ring-sentinel-500
+                     disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-muted disabled:hover:border-border"
+          aria-label="Next day"
+          title="Next day"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
       </div>
 
       {/* Error banner */}

@@ -90,6 +90,9 @@ func (a *APNsSender) Send(ctx context.Context, token string, notif Notification)
 	payload := map[string]any{
 		"aps": buildAPSPayload(notif.Title, notif.Body, notif.Critical),
 	}
+	if notif.CameraName != "" {
+		payload["camera_name"] = notif.CameraName
+	}
 	if notif.DeepLink != "" {
 		payload["deep_link"] = notif.DeepLink
 	}

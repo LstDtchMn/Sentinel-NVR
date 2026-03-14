@@ -1,11 +1,12 @@
 /**
  * Dashboard — system health overview page.
  * Auto-refreshes every 10s via the /api/v1/health endpoint.
+ * Includes a per-camera health table below the stat cards.
  * Uses AbortController so in-flight requests are cancelled on unmount.
  */
 import { useEffect, useState } from "react";
-import { api, HealthStatus } from "../api/client";
-import { Activity, Database, Cpu, Film, HardDrive, Radio } from "lucide-react";
+import { api, HealthStatus, CameraDetail, CameraState } from "../api/client";
+import { Activity, Database, Cpu, Film, HardDrive, Radio, Check, Minus } from "lucide-react";
 
 type StatColor = "green" | "blue" | "purple" | "cyan" | "yellow" | "red";
 
@@ -36,8 +37,32 @@ function formatUptime(raw: string): string {
   return `${secs}s`;
 }
 
+/** Format an ISO timestamp as a relative time string (e.g. "2h ago"). */
+function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 0) return "just now";
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+const STATUS_BADGE_COLORS: Record<CameraState, { bg: string; text: string }> = {
+  recording: { bg: "bg-green-900/30", text: "text-green-400" },
+  streaming: { bg: "bg-green-900/30", text: "text-green-400" },
+  connecting: { bg: "bg-yellow-900/30", text: "text-yellow-400" },
+  error: { bg: "bg-red-900/30", text: "text-red-400" },
+  idle: { bg: "bg-zinc-800/50", text: "text-faint" },
+  stopped: { bg: "bg-zinc-800/50", text: "text-faint" },
+};
+
 export default function Dashboard() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [cameras, setCameras] = useState<CameraDetail[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -47,11 +72,13 @@ export default function Dashboard() {
     let currentController: AbortController | null = null;
     let unmounted = false;
 
-    const fetchHealth = () => {
+    const fetchData = () => {
       currentController?.abort(); // cancel any in-flight request
       currentController = new AbortController();
+      const signal = currentController.signal;
+
       api
-        .getHealth(currentController.signal)
+        .getHealth(signal)
         .then((data) => {
           if (unmounted) return;
           setHealth(data);
@@ -62,10 +89,22 @@ export default function Dashboard() {
           if (err instanceof DOMException && err.name === "AbortError") return;
           setError(err.message);
         });
+
+      api
+        .getCameras(signal)
+        .then((data) => {
+          if (unmounted) return;
+          setCameras(data);
+        })
+        .catch((err) => {
+          if (unmounted) return;
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          // Camera fetch failure is non-fatal — health card still shows
+        });
     };
 
-    fetchHealth();
-    const interval = setInterval(fetchHealth, 10_000);
+    fetchData();
+    const interval = setInterval(fetchData, 10_000);
 
     return () => {
       unmounted = true;
@@ -130,7 +169,76 @@ export default function Dashboard() {
           Connecting to backend...
         </p>
       )}
+
+      {/* Per-camera health table */}
+      {cameras && cameras.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-lg font-semibold mb-4">Camera Status</h2>
+          <div className="bg-surface-raised border border-border rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-muted">
+                  <th className="px-4 py-3 font-medium">Camera Name</th>
+                  <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium text-center">Recording</th>
+                  <th className="px-4 py-3 font-medium text-center">Detecting</th>
+                  <th className="px-4 py-3 font-medium">Last Error</th>
+                  <th className="px-4 py-3 font-medium">Connected At</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cameras.map((cam) => (
+                  <CameraStatusRow key={cam.id} camera={cam} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function CameraStatusRow({ camera }: { camera: CameraDetail }) {
+  const ps = camera.pipeline_status;
+  const state: CameraState = ps?.state || "idle";
+  const colors = STATUS_BADGE_COLORS[state] || STATUS_BADGE_COLORS.idle;
+
+  return (
+    <tr className="border-b border-border/50 last:border-b-0 hover:bg-white/[0.02]">
+      <td className="px-4 py-3 font-medium">{camera.name}</td>
+      <td className="px-4 py-3">
+        <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${colors.bg} ${colors.text}`}>
+          {state}
+        </span>
+      </td>
+      <td className="px-4 py-3 text-center">
+        {ps?.recording ? (
+          <Check className="w-4 h-4 text-green-400 inline-block" />
+        ) : (
+          <Minus className="w-4 h-4 text-faint inline-block" />
+        )}
+      </td>
+      <td className="px-4 py-3 text-center">
+        {ps?.detecting ? (
+          <Check className="w-4 h-4 text-green-400 inline-block" />
+        ) : (
+          <Minus className="w-4 h-4 text-faint inline-block" />
+        )}
+      </td>
+      <td className="px-4 py-3 max-w-[200px]">
+        {ps?.last_error ? (
+          <span className="text-red-400 text-xs truncate block" title={ps.last_error}>
+            {ps.last_error}
+          </span>
+        ) : (
+          <span className="text-faint">&mdash;</span>
+        )}
+      </td>
+      <td className="px-4 py-3 text-muted text-xs">
+        {ps?.connected_at ? formatRelativeTime(ps.connected_at) : "\u2014"}
+      </td>
+    </tr>
   );
 }
 

@@ -174,6 +174,7 @@ export interface EventListParams {
   camera_id?: number;
   type?: string;
   date?: string; // YYYY-MM-DD
+  min_confidence?: number; // 0.0–1.0
   limit?: number;
   offset?: number;
 }
@@ -494,6 +495,14 @@ class ApiClient {
     });
   }
 
+  /** Restarts a camera's pipeline without modifying its configuration (admin only). */
+  async restartCamera(name: string, signal?: AbortSignal): Promise<void> {
+    await this.request(`/cameras/${encodeURIComponent(name)}/restart`, {
+      method: "POST",
+      signal,
+    });
+  }
+
   getConfig(signal?: AbortSignal): Promise<SystemConfig> {
     return this.request<SystemConfig>("/config", { signal });
   }
@@ -572,6 +581,7 @@ class ApiClient {
     if (params?.camera_id !== undefined) query.set("camera_id", String(params.camera_id));
     if (params?.type) query.set("type", params.type);
     if (params?.date) query.set("date", params.date);
+    if (params?.min_confidence !== undefined) query.set("min_confidence", String(params.min_confidence));
     if (params?.limit !== undefined) query.set("limit", String(params.limit));
     if (params?.offset !== undefined) query.set("offset", String(params.offset));
     const qs = query.toString();

@@ -114,6 +114,7 @@ func (s *Server) registerRoutes() {
 		protected.POST("/cameras", s.handleCreateCamera)
 		protected.PUT("/cameras/:name", s.handleUpdateCamera)
 		protected.DELETE("/cameras/:name", s.handleDeleteCamera)
+		protected.POST("/cameras/:name/restart", s.handleRestartCamera)
 
 		// Test camera stream connectivity
 		protected.POST("/cameras/test-stream", s.handleTestStream)
@@ -851,6 +852,32 @@ func (s *Server) handleDeleteCamera(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// handleRestartCamera stops and restarts a camera's pipeline without modifying the DB.
+// POST /api/v1/cameras/:name/restart (admin only)
+func (s *Server) handleRestartCamera(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+	name := c.Param("name")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	err := s.camManager.RestartCamera(ctx, name)
+	if errors.Is(err, camera.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "camera not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to restart camera pipeline", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	s.logger.Info("camera pipeline restarted via API", "name", name, "user", c.GetString("username"))
+	c.JSON(http.StatusOK, gin.H{"status": "restarted"})
+}
+
 // handleCameraSnapshot grabs a single JPEG frame from go2rtc for the named camera
 // and returns it as image/jpeg. Used as the background image for the zone editor (Phase 9).
 // Prefers the sub-stream when configured (lower resolution → faster grab).
@@ -1221,7 +1248,7 @@ func (s *Server) handleRecordingDays(c *gin.Context) {
 }
 
 // handleListEvents returns events with optional filtering and pagination.
-// Query params: camera_id (int), type (string), date (YYYY-MM-DD), limit (1–500, default 50), offset (int).
+// Query params: camera_id (int), type (string), date (YYYY-MM-DD), min_confidence (float 0–1), limit (1–500, default 50), offset (int).
 func (s *Server) handleListEvents(c *gin.Context) {
 	f := detection.ListFilter{Limit: 50}
 
@@ -1242,6 +1269,15 @@ func (s *Server) handleListEvents(c *gin.Context) {
 			return
 		}
 		f.Date = dateStr
+	}
+
+	if mcStr := c.Query("min_confidence"); mcStr != "" {
+		mc, err := strconv.ParseFloat(mcStr, 64)
+		if err != nil || mc < 0 || mc > 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "min_confidence must be a float between 0 and 1"})
+			return
+		}
+		f.MinConfidence = &mc
 	}
 
 	if limitStr := c.Query("limit"); limitStr != "" {

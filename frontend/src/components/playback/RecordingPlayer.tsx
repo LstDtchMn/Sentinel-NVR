@@ -273,10 +273,11 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
           <a
             href={api.recordingPlayURL(segment.id)}
             download
-            className="p-1.5 rounded hover:bg-white/10 transition-colors shrink-0"
+            className="bg-surface-overlay border border-border hover:bg-surface-raised px-3 py-1.5 rounded-lg text-sm flex items-center gap-2 shrink-0 transition-colors"
             title="Download segment"
           >
             <Download className="w-4 h-4" />
+            Download
           </a>
         </div>
       )}

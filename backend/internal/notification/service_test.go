@@ -27,11 +27,15 @@ func TestBuildNotification_Detection(t *testing.T) {
 	}
 	n := buildNotification(event)
 
-	if n.Title != "Detection: person" {
-		t.Errorf("Title = %q, want %q", n.Title, "Detection: person")
+	wantTitle := "Detection: person on Front Door"
+	if n.Title != wantTitle {
+		t.Errorf("Title = %q, want %q", n.Title, wantTitle)
 	}
 	if !strings.Contains(n.Body, "95%") {
 		t.Errorf("Body %q should contain confidence percentage 95%%", n.Body)
+	}
+	if !strings.Contains(n.Body, "Front Door") {
+		t.Errorf("Body %q should contain camera name", n.Body)
 	}
 	if n.CameraName != "Front Door" {
 		t.Errorf("CameraName = %q, want %q", n.CameraName, "Front Door")

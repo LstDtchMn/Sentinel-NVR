@@ -39,11 +39,12 @@ type HeatmapBucket struct {
 // ListFilter specifies optional filters for Repository.List.
 // Zero values are ignored (no filter applied for that field).
 type ListFilter struct {
-	CameraID *int   // filter by camera
-	Type     string // e.g. "detection", "camera.connected"
-	Date     string // "YYYY-MM-DD" in server local time
-	Limit    int    // 1–500; defaults to 50 if zero
-	Offset   int
+	CameraID      *int     // filter by camera
+	Type          string   // e.g. "detection", "camera.connected"
+	Date          string   // "YYYY-MM-DD" in server local time
+	MinConfidence *float64 // minimum confidence threshold (0.0–1.0)
+	Limit         int      // 1–500; defaults to 50 if zero
+	Offset        int
 }
 
 // Repository provides CRUD access to the events table.
@@ -250,6 +251,10 @@ func buildWhere(f ListFilter) (string, []any) {
 			args = append(args, end)
 		}
 		// Silently ignore an unparseable date — callers should validate before calling List.
+	}
+	if f.MinConfidence != nil {
+		conds = append(conds, "confidence >= ?")
+		args = append(args, *f.MinConfidence)
 	}
 
 	if len(conds) == 0 {
