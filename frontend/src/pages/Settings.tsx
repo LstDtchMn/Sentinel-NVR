@@ -580,7 +580,7 @@ export default function Settings() {
         </section>
 
         {dirty && (
-          <div className="sticky bottom-0 bg-surface-base border-t border-border py-3 px-8 -mx-8">
+          <div className="sticky bottom-0 bg-surface-base/95 backdrop-blur-sm border-t border-border py-3 px-8 -mx-8">
             <div className="flex justify-end">
               <button
                 type="submit"

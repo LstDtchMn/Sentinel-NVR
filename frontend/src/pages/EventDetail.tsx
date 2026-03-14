@@ -54,6 +54,19 @@ function eventTypeLabel(type: string): string {
   }
 }
 
+function eventTypeBadgeClass(type: string): string {
+  switch (type) {
+    case "detection": return "bg-blue-500/20 text-blue-400";
+    case "face_match": return "bg-purple-500/20 text-purple-400";
+    case "audio_detection": return "bg-amber-500/20 text-amber-400";
+    case "camera.connected":
+    case "camera.disconnected": return "bg-orange-500/20 text-orange-400";
+    case "recording.started":
+    case "recording.stopped": return "bg-green-500/20 text-green-400";
+    default: return "bg-gray-500/20 text-gray-400";
+  }
+}
+
 export default function EventDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -131,7 +144,7 @@ export default function EventDetail() {
             onError={() => setImgError(true)}
           />
         ) : (
-          <div className="aspect-video flex items-center justify-center bg-surface-overlay">
+          <div className="h-48 flex items-center justify-center bg-surface-overlay">
             <ImageOff className="w-16 h-16 text-faint" />
           </div>
         )}
@@ -157,7 +170,11 @@ export default function EventDetail() {
         {/* Metadata rows */}
         <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
           <dt className="text-muted">Event type</dt>
-          <dd>{eventTypeLabel(event.type)}</dd>
+          <dd>
+            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${eventTypeBadgeClass(event.type)}`}>
+              {eventTypeLabel(event.type)}
+            </span>
+          </dd>
 
           {event.label && event.label !== event.type && (
             <>
