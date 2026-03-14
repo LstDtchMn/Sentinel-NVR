@@ -1,0 +1,19 @@
+# Production overrides — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Changes from dev:
+# - Frontend uses nginx serving pre-built static files (no Vite dev server)
+# - No rtsp-test service (dev profile not activated)
+# - No source bind mount on frontend
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    ports:
+      - "5173:80"
+    volumes: []  # Override dev bind mount — prod serves from built image
+    networks:
+      - frontend
+      - backend  # nginx needs to reach sentinel for API proxy

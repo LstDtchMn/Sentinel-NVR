@@ -39,7 +39,7 @@ import (
 )
 
 // version is set at build time via -ldflags="-X main.version=x.y.z".
-var version = "0.1.0-dev"
+var version = "0.1.0"
 
 func main() {
 	configPath := flag.String("config", "/etc/sentinel/sentinel.yml", "path to configuration file")
