@@ -44,6 +44,12 @@ func NewRepository(db *sql.DB) *Repository {
 // For completed segments (reported by ffmpeg's segment_list), all fields are available.
 // For in-progress segments, end_time can be nil and duration_s/size_bytes zero.
 func (r *Repository) Create(ctx context.Context, rec *Record) (*Record, error) {
+	if rec.EndTime != nil && rec.EndTime.Before(rec.StartTime) {
+		return nil, fmt.Errorf("end_time (%v) cannot be before start_time (%v)", rec.EndTime, rec.StartTime)
+	}
+	if rec.DurationS < 0 {
+		return nil, fmt.Errorf("duration_s cannot be negative: %f", rec.DurationS)
+	}
 	var createdStr string
 	row := r.db.QueryRowContext(ctx,
 		`INSERT INTO recordings (camera_id, camera_name, path, start_time, end_time, duration_s, size_bytes)

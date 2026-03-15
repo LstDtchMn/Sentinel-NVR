@@ -345,7 +345,10 @@ export default function Playback() {
     exportCtrlRef.current = ctrl;
 
     try {
-      // Build RFC3339 timestamps from selectedDate + seconds-since-midnight
+      // Build RFC3339 timestamps from selectedDate + seconds-since-midnight.
+      // Extract the timezone offset from the first segment's start_time rather than
+      // appending "Z" (UTC). Seconds-since-midnight are computed from the server's
+      // local timezone, so using "Z" produces the wrong time slice on non-UTC servers.
       const dateBase = selectedDate + "T";
       const startH = Math.floor(exportStart / 3600);
       const startM = Math.floor((exportStart % 3600) / 60);
@@ -354,8 +357,19 @@ export default function Playback() {
       const endM = Math.floor((exportEnd % 3600) / 60);
       const endS = Math.floor(exportEnd % 60);
       const pad = (n: number) => String(n).padStart(2, "0");
-      const startRFC = dateBase + `${pad(startH)}:${pad(startM)}:${pad(startS)}Z`;
-      const endRFC = dateBase + `${pad(endH)}:${pad(endM)}:${pad(endS)}Z`;
+
+      // Derive timezone offset from the segment timestamps returned by the API.
+      // These already carry the correct offset (e.g. "+05:00" or "-04:00").
+      // Fall back to no suffix (backend parses as local time) if no segments exist.
+      let tzSuffix = "";
+      if (segments.length > 0) {
+        const match = segments[0].start_time.match(/([+-]\d{2}:\d{2})$/);
+        if (match) {
+          tzSuffix = match[1];
+        }
+      }
+      const startRFC = dateBase + `${pad(startH)}:${pad(startM)}:${pad(startS)}${tzSuffix}`;
+      const endRFC = dateBase + `${pad(endH)}:${pad(endM)}:${pad(endS)}${tzSuffix}`;
 
       const result = await api.exportClip(
         { camera_name: selectedCamera, start: startRFC, end: endRFC },
@@ -379,7 +393,7 @@ export default function Playback() {
     } finally {
       setExporting(false);
     }
-  }, [selectedCamera, selectedDate, exportStart, exportEnd, exportDuration]);
+  }, [selectedCamera, selectedDate, exportStart, exportEnd, exportDuration, segments]);
 
   // Cleanup export controller on unmount
   useEffect(() => () => exportCtrlRef.current?.abort(), []);

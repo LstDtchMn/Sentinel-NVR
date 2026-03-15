@@ -68,6 +68,7 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
   const [playing, setPlaying] = useState(false);
   const [videoTime, setVideoTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [videoError, setVideoError] = useState(false);
 
   // Current segment index for prev/next
   const currentIndex = segment ? segments.findIndex((s) => s.id === segment.id) : -1;
@@ -86,6 +87,9 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
     // Consume pending seek before src changes so it applies to the incoming segment.
     const seekOffset = pendingSeekRef.current;
     pendingSeekRef.current = null;
+
+    // Clear any previous error state when loading a new segment.
+    setVideoError(false);
 
     video.src = api.recordingPlayURL(segment.id);
     // Set rate immediately (may be reset by browser on src change) and again
@@ -250,7 +254,38 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
           className={`w-full h-full object-contain ${segment ? "block" : "hidden"}`}
           playsInline
           onEnded={onEnded}
+          onError={() => {
+            const video = videoRef.current;
+            const code = video?.error?.code;
+            const msg = video?.error?.message ?? "unknown error";
+            console.error("Video playback error:", { code, message: msg, segmentId: segment?.id });
+            setVideoError(true);
+          }}
         />
+
+        {/* Video error overlay */}
+        {segment && videoError && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-10">
+            <span className="text-red-400 text-sm mb-3">
+              Failed to load recording. The file may be corrupt or unavailable.
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setVideoError(false);
+                const video = videoRef.current;
+                if (video && segment) {
+                  video.src = api.recordingPlayURL(segment.id);
+                  video.load();
+                  video.play().catch(() => {});
+                }
+              }}
+              className="px-4 py-1.5 rounded-lg text-sm font-medium bg-sentinel-500 hover:bg-sentinel-600 text-white transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {/* Wall-clock time overlay */}
         {segment && (

@@ -313,9 +313,17 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 			if _, err := os.Stat(alt); err == nil {
 				segPath = alt
 			} else {
-				r.logger.Warn("could not reconstruct absolute path for segment",
-					"raw", segPath, "tried", reconstructed, "alt", alt)
-				return
+				// Also try next hour (segment started just before boundary, completed after)
+				nextHour := now.Add(time.Hour)
+				alt2 := filepath.Join(r.hotPath, sanitized,
+					nextHour.Format("2006-01-02"), fmt.Sprintf("%02d", nextHour.Hour()), segPath)
+				if _, err := os.Stat(alt2); err == nil {
+					segPath = alt2
+				} else {
+					r.logger.Warn("could not reconstruct absolute path for segment",
+						"raw", segPath, "tried", reconstructed, "alt", alt, "alt2", alt2)
+					return
+				}
 			}
 		}
 	}
