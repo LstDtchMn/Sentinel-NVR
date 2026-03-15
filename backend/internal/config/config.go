@@ -390,9 +390,10 @@ func Validate(cfg *Config) error {
 	return nil
 }
 
-// Save writes the current configuration back to a YAML file atomically.
-// Writes to a temporary file first, then renames to prevent config corruption
-// if the process is killed or the system loses power during the write.
+// Save writes the current configuration back to a YAML file.
+// Attempts atomic write (temp + rename) first. Falls back to direct write
+// when rename fails — this happens with Docker bind-mounted config files
+// because the container holds a reference to the original inode.
 func Save(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -403,8 +404,12 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("writing temp config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) // best-effort cleanup
-		return fmt.Errorf("replacing config file: %w", err)
+		// Rename fails on Docker bind mounts ("device or resource busy").
+		// Fall back to direct overwrite — less crash-safe but functional.
+		os.Remove(tmp)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			return fmt.Errorf("writing config file: %w", err)
+		}
 	}
 	return nil
 }
