@@ -191,7 +191,9 @@ func (s *Server) handleUpdateCamera(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	// 30s timeout: UpdateCamera internally waits up to 15s for old pipeline exit
+	// plus go2rtc network calls — 10s was too tight and caused context deadline errors.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
 	result, err := s.camManager.UpdateCamera(ctx, name, rec)
@@ -337,13 +339,20 @@ func (s *Server) handleCameraSnapshot(c *gin.Context) {
 	}
 
 	// Prefer sub-stream for snapshots — lower resolution, faster frame grab.
-	// TODO(review): L15 — add main-stream fallback when sub-stream snapshot fails
+	// Fall back to main stream if the sub-stream fails (e.g. sub-stream offline
+	// but main stream is healthy).
 	streamName := cam.Name
 	if cam.SubStream != "" {
 		streamName = cam.Name + "_sub"
 	}
 
 	jpegBytes, err := s.g2r.FrameJPEG(ctx, streamName)
+	if (err != nil || len(jpegBytes) == 0) && cam.SubStream != "" {
+		// Sub-stream failed — fall back to main stream.
+		s.logger.Warn("sub-stream snapshot failed, falling back to main stream",
+			"name", cam.Name, "error", err)
+		jpegBytes, err = s.g2r.FrameJPEG(ctx, cam.Name)
+	}
 	if err != nil || len(jpegBytes) == 0 {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stream unavailable"})
 		return
@@ -432,7 +441,9 @@ func (s *Server) handleDiscoverCameras(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 6*time.Second)
+	// 10s route timeout: ONVIF discovery itself takes up to 5s, plus response
+	// processing time. 6s was too tight and caused context deadline errors.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
 	devices, err := onvif.Discover(ctx, 5*time.Second)

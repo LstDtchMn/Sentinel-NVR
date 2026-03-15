@@ -38,7 +38,19 @@ var validCameraName = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9 _-]{0,62}[a-zA
 func SanitizeName(name string) string {
 	s := strings.ToLower(name)
 	s = strings.ReplaceAll(s, " ", "_")
-	return s
+	// Defense-in-depth: strip any characters not allowed in directory names.
+	// The camera name regex already prevents most, but SanitizeName is used
+	// for filesystem paths and should be independently safe.
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "camera"
+	}
+	return b.String()
 }
 
 // allowedStreamSchemes lists the protocols accepted for camera stream URLs.
@@ -276,12 +288,30 @@ func (m *Manager) AddCamera(ctx context.Context, cam *CameraRecord) (*CameraWith
 	result := &CameraWithStatus{CameraRecord: *created}
 
 	if created.Enabled {
-		if err := m.syncToGo2RTC(ctx, created); err != nil {
-			m.logger.Error("failed to sync new camera to go2rtc",
+		// Sync main stream to go2rtc first. If this fails, the camera was added to
+		// the DB but can't stream — a false success. Roll back the DB insert so the
+		// frontend shows an error instead.
+		if err := m.g2r.AddStream(ctx, created.Name, created.MainStream); err != nil {
+			m.logger.Error("failed to sync main stream to go2rtc, rolling back DB insert",
 				"name", created.Name,
 				"main_stream", RedactStreamURL(created.MainStream),
 				"error", err,
 			)
+			if delErr := m.repo.Delete(ctx, created.Name); delErr != nil {
+				m.logger.Error("failed to rollback camera DB insert after go2rtc sync failure",
+					"name", created.Name, "error", delErr)
+			}
+			return nil, fmt.Errorf("camera stream unreachable (go2rtc sync failed): %w", err)
+		}
+		// Sub-stream sync failure is non-fatal — camera works with main stream only.
+		if created.SubStream != "" {
+			if err := m.g2r.AddStream(ctx, created.Name+"_sub", created.SubStream); err != nil {
+				m.logger.Warn("failed to sync sub-stream to go2rtc (non-fatal)",
+					"name", created.Name+"_sub",
+					"sub_stream", RedactStreamURL(created.SubStream),
+					"error", err,
+				)
+			}
 		}
 
 		pipeline := NewPipeline(created, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger, m.pipeDeps)
