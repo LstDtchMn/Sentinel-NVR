@@ -183,6 +183,49 @@ export function AddCameraForm({
   );
 }
 
+/** Slider with label and value display for numeric camera settings. */
+function LabeledSlider({
+  id,
+  label,
+  helpText,
+  value,
+  min,
+  max,
+  step,
+  formatValue,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  helpText?: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  formatValue: (v: number) => string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label htmlFor={id} className="block text-sm text-muted">{label}</label>
+        <span className="text-sm text-white/80 font-mono">{formatValue(value)}</span>
+      </div>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full accent-sentinel-500"
+      />
+      {helpText && <p className="mt-0.5 text-xs text-faint">{helpText}</p>}
+    </div>
+  );
+}
+
 export function EditCameraForm({
   camera,
   onSuccess,
@@ -198,6 +241,8 @@ export function EditCameraForm({
   const [enabled, setEnabled] = useState(camera.enabled);
   const [record, setRecord] = useState(camera.record);
   const [detect, setDetect] = useState(camera.detect);
+  const [cooldown, setCooldown] = useState(camera.notification_cooldown_seconds ?? 60);
+  const [detectionInterval, setDetectionInterval] = useState(camera.detection_interval ?? 0);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const saveCtrlRef = useRef<AbortController>(null);
@@ -233,6 +278,8 @@ export function EditCameraForm({
         enabled,
         record,
         detect,
+        notification_cooldown_seconds: cooldown,
+        detection_interval: detectionInterval,
       };
       await api.updateCamera(currentName, input, ctrl.signal);
       onSuccess();
@@ -311,6 +358,32 @@ export function EditCameraForm({
           <Toggle label="Enabled" checked={enabled} onChange={setEnabled} />
           <Toggle label="Record" checked={record} onChange={setRecord} />
           <Toggle label="Detect" checked={detect} onChange={setDetect} />
+        </div>
+
+        {/* Detection settings (v0.3) — per-camera cooldown and detection interval */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-border/50">
+          <LabeledSlider
+            id="edit-cooldown"
+            label="Notification Cooldown"
+            helpText="Minimum seconds between notifications for the same label on this camera"
+            value={cooldown}
+            min={30}
+            max={300}
+            step={10}
+            formatValue={(v) => `${v}s`}
+            onChange={setCooldown}
+          />
+          <LabeledSlider
+            id="edit-detection-interval"
+            label="Detection Interval"
+            helpText="Seconds between frame grabs. 0 = use global default."
+            value={detectionInterval}
+            min={0}
+            max={10}
+            step={0.5}
+            formatValue={(v) => v === 0 ? "Global" : `${v}s`}
+            onChange={setDetectionInterval}
+          />
         </div>
 
         <div>

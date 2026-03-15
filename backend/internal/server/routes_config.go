@@ -123,6 +123,34 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 		st.HotPath = cfg.Storage.HotPath
 		st.ColdPath = cfg.Storage.ColdPath
 	}
+	// MQTT config — strip password for non-admin users
+	mqttResp := gin.H{
+		"enabled":      cfg.MQTT.Enabled,
+		"broker":       cfg.MQTT.Broker,
+		"topic_prefix": cfg.MQTT.TopicPrefix,
+		"username":     cfg.MQTT.Username,
+		"ha_discovery": cfg.MQTT.HADiscovery,
+	}
+	if isAdmin {
+		mqttResp["password"] = cfg.MQTT.Password
+	} else {
+		mqttResp["password"] = ""
+	}
+
+	// Notifications SMTP config — strip password for non-admin users
+	smtpResp := gin.H{
+		"host":     cfg.Notifications.SMTP.Host,
+		"port":     cfg.Notifications.SMTP.Port,
+		"username": cfg.Notifications.SMTP.Username,
+		"from":     cfg.Notifications.SMTP.From,
+		"tls":      cfg.Notifications.SMTP.TLS,
+	}
+	if isAdmin {
+		smtpResp["password"] = cfg.Notifications.SMTP.Password
+	} else {
+		smtpResp["password"] = ""
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"server": safeServer{
 			Host:     cfg.Server.Host,
@@ -131,7 +159,11 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 		},
 		"storage":   st,
 		"detection": gin.H{"enabled": cfg.Detection.Enabled, "backend": cfg.Detection.Backend},
-		"cameras":   safeCams,
+		"mqtt":      mqttResp,
+		"notifications": gin.H{
+			"smtp": smtpResp,
+		},
+		"cameras": safeCams,
 	})
 }
 
@@ -153,6 +185,24 @@ func (s *Server) handleUpdateConfig(c *gin.Context) {
 			ColdRetentionDays int `json:"cold_retention_days"`
 			SegmentDuration   int `json:"segment_duration"`
 		} `json:"storage"`
+		MQTT *struct {
+			Enabled     *bool  `json:"enabled"`
+			Broker      string `json:"broker"`
+			TopicPrefix string `json:"topic_prefix"`
+			Username    string `json:"username"`
+			Password    string `json:"password"`
+			HADiscovery *bool  `json:"ha_discovery"`
+		} `json:"mqtt"`
+		Notifications *struct {
+			SMTP *struct {
+				Host     *string `json:"host"`
+				Port     *int    `json:"port"`
+				Username *string `json:"username"`
+				Password *string `json:"password"`
+				From     *string `json:"from"`
+				TLS      *bool   `json:"tls"`
+			} `json:"smtp"`
+		} `json:"notifications"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -174,6 +224,44 @@ func (s *Server) handleUpdateConfig(c *gin.Context) {
 		}
 		if input.Storage.SegmentDuration > 0 {
 			cfgCopy.Storage.SegmentDuration = input.Storage.SegmentDuration
+		}
+	}
+	if input.MQTT != nil {
+		if input.MQTT.Enabled != nil {
+			cfgCopy.MQTT.Enabled = *input.MQTT.Enabled
+		}
+		if input.MQTT.Broker != "" {
+			cfgCopy.MQTT.Broker = input.MQTT.Broker
+		}
+		if input.MQTT.TopicPrefix != "" {
+			cfgCopy.MQTT.TopicPrefix = input.MQTT.TopicPrefix
+		}
+		// Username and password can be set to empty string intentionally
+		cfgCopy.MQTT.Username = input.MQTT.Username
+		cfgCopy.MQTT.Password = input.MQTT.Password
+		if input.MQTT.HADiscovery != nil {
+			cfgCopy.MQTT.HADiscovery = *input.MQTT.HADiscovery
+		}
+	}
+	if input.Notifications != nil && input.Notifications.SMTP != nil {
+		smtp := input.Notifications.SMTP
+		if smtp.Host != nil {
+			cfgCopy.Notifications.SMTP.Host = *smtp.Host
+		}
+		if smtp.Port != nil {
+			cfgCopy.Notifications.SMTP.Port = *smtp.Port
+		}
+		if smtp.Username != nil {
+			cfgCopy.Notifications.SMTP.Username = *smtp.Username
+		}
+		if smtp.Password != nil {
+			cfgCopy.Notifications.SMTP.Password = *smtp.Password
+		}
+		if smtp.From != nil {
+			cfgCopy.Notifications.SMTP.From = *smtp.From
+		}
+		if smtp.TLS != nil {
+			cfgCopy.Notifications.SMTP.TLS = *smtp.TLS
 		}
 	}
 

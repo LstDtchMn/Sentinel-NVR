@@ -32,6 +32,7 @@ type DetectionPipeline struct {
 	detector           Detector
 	snapshotDir        string        // pre-built absolute path: {snapshotPath}/{sanitizedCamName}
 	threshold          float64       // minimum confidence to trigger a detection event
+	minBBoxArea        float64       // minimum bbox area as fraction of frame area; 0 = disabled
 	frameInterval      time.Duration // how often to grab and process a frame
 	bus                *eventbus.Bus
 	logger             *slog.Logger
@@ -84,6 +85,7 @@ func NewDetectionPipeline(
 	detector Detector,
 	snapshotDir string,
 	threshold float64,
+	minBBoxArea float64,
 	frameInterval time.Duration,
 	bus *eventbus.Bus,
 	logger *slog.Logger,
@@ -103,6 +105,7 @@ func NewDetectionPipeline(
 		detector:           detector,
 		snapshotDir:        snapshotDir,
 		threshold:          threshold,
+		minBBoxArea:        minBBoxArea,
 		frameInterval:      frameInterval,
 		bus:                bus,
 		logger:             logger.With("camera", cam.Name, "component", "detection_pipeline"),
@@ -257,6 +260,26 @@ func (dp *DetectionPipeline) processFrame() {
 	}
 	if len(above) == 0 {
 		return
+	}
+
+	// v0.3: Filter by minimum bounding box area — reject tiny detections that are
+	// typically rain artifacts, shadows, or sensor noise. The bbox coordinates are
+	// normalised to [0.0, 1.0], so (width * height) gives the area as a fraction
+	// of the total frame area. Default threshold is 0.03 (3%).
+	if dp.minBBoxArea > 0 {
+		filtered := above[:0:0]
+		for _, d := range above {
+			bboxWidth := d.BBox.XMax - d.BBox.XMin
+			bboxHeight := d.BBox.YMax - d.BBox.YMin
+			area := bboxWidth * bboxHeight
+			if area >= dp.minBBoxArea {
+				filtered = append(filtered, d)
+			}
+		}
+		above = filtered
+		if len(above) == 0 {
+			return
+		}
 	}
 
 	// Zone filtering (Phase 9, R5): when zones are configured, restrict detections

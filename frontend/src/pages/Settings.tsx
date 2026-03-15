@@ -32,6 +32,22 @@ export default function Settings() {
   const [coldRetention, setColdRetention] = useState(30);
   const [segmentDuration, setSegmentDuration] = useState(10);
 
+  // MQTT state (v0.3)
+  const [mqttEnabled, setMqttEnabled] = useState(false);
+  const [mqttBroker, setMqttBroker] = useState("");
+  const [mqttTopicPrefix, setMqttTopicPrefix] = useState("sentinel");
+  const [mqttUsername, setMqttUsername] = useState("");
+  const [mqttPassword, setMqttPassword] = useState("");
+  const [mqttHADiscovery, setMqttHADiscovery] = useState(false);
+
+  // SMTP email notification state
+  const [smtpHost, setSmtpHost] = useState("");
+  const [smtpPort, setSmtpPort] = useState(587);
+  const [smtpUsername, setSmtpUsername] = useState("");
+  const [smtpPassword, setSmtpPassword] = useState("");
+  const [smtpFrom, setSmtpFrom] = useState("");
+  const [smtpTls, setSmtpTls] = useState(true);
+
   // Submission state
   const [submitting, setSubmitting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -76,6 +92,24 @@ export default function Settings() {
         // Use Math.max(1, ...) so the form input is never below its min={1} constraint.
         setColdRetention(Math.max(1, cfg.storage.cold_retention_days));
         setSegmentDuration(cfg.storage.segment_duration);
+        // MQTT
+        if (cfg.mqtt) {
+          setMqttEnabled(cfg.mqtt.enabled);
+          setMqttBroker(cfg.mqtt.broker || "");
+          setMqttTopicPrefix(cfg.mqtt.topic_prefix || "sentinel");
+          setMqttUsername(cfg.mqtt.username || "");
+          setMqttPassword(cfg.mqtt.password || "");
+          setMqttHADiscovery(cfg.mqtt.ha_discovery);
+        }
+        // SMTP
+        if (cfg.notifications?.smtp) {
+          setSmtpHost(cfg.notifications.smtp.host || "");
+          setSmtpPort(cfg.notifications.smtp.port || 587);
+          setSmtpUsername(cfg.notifications.smtp.username || "");
+          setSmtpPassword(cfg.notifications.smtp.password || "");
+          setSmtpFrom(cfg.notifications.smtp.from || "");
+          setSmtpTls(cfg.notifications.smtp.tls ?? true);
+        }
       })
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -123,7 +157,19 @@ export default function Settings() {
     logLevel !== (config.server.log_level || "info") ||
     hotRetention !== config.storage.hot_retention_days ||
     coldRetention !== Math.max(1, config.storage.cold_retention_days) ||
-    segmentDuration !== config.storage.segment_duration
+    segmentDuration !== config.storage.segment_duration ||
+    mqttEnabled !== (config.mqtt?.enabled ?? false) ||
+    mqttBroker !== (config.mqtt?.broker ?? "") ||
+    mqttTopicPrefix !== (config.mqtt?.topic_prefix ?? "sentinel") ||
+    mqttUsername !== (config.mqtt?.username ?? "") ||
+    mqttPassword !== (config.mqtt?.password ?? "") ||
+    mqttHADiscovery !== (config.mqtt?.ha_discovery ?? false) ||
+    smtpHost !== (config.notifications?.smtp?.host ?? "") ||
+    smtpPort !== (config.notifications?.smtp?.port ?? 587) ||
+    smtpUsername !== (config.notifications?.smtp?.username ?? "") ||
+    smtpPassword !== (config.notifications?.smtp?.password ?? "") ||
+    smtpFrom !== (config.notifications?.smtp?.from ?? "") ||
+    smtpTls !== (config.notifications?.smtp?.tls ?? true)
   );
 
   // QR payload for mobile pairing (Phase 12, CG11)
@@ -225,6 +271,24 @@ export default function Settings() {
             hot_retention_days: hotRetention,
             cold_retention_days: coldRetention,
             segment_duration: segmentDuration,
+          },
+          mqtt: {
+            enabled: mqttEnabled,
+            broker: mqttBroker,
+            topic_prefix: mqttTopicPrefix,
+            username: mqttUsername,
+            password: mqttPassword,
+            ha_discovery: mqttHADiscovery,
+          },
+          notifications: {
+            smtp: {
+              host: smtpHost,
+              port: smtpPort,
+              username: smtpUsername,
+              password: smtpPassword,
+              from: smtpFrom,
+              tls: smtpTls,
+            },
           },
         },
         ctrl.signal,
@@ -568,6 +632,234 @@ export default function Settings() {
             </div>
           </section>
         )}
+
+        {/* MQTT section (v0.3) */}
+        <section className="bg-surface-raised border border-border rounded-lg p-5">
+          <h2 className="text-sm font-medium text-muted mb-1">MQTT</h2>
+          <p className="text-xs text-faint mb-4">
+            Publish detection and camera events to an MQTT broker for Home Assistant integration.
+            Changes take effect after saving and restarting the server.
+          </p>
+          <div className="space-y-4">
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={mqttEnabled}
+                onChange={(e) => { setMqttEnabled(e.target.checked); setSaveSuccess(false); }}
+                className="sr-only peer"
+              />
+              <div
+                className={`w-8 h-5 rounded-full relative transition-colors cursor-pointer ${
+                  mqttEnabled ? "bg-sentinel-500" : "bg-border"
+                }`}
+              >
+                <div
+                  className={`absolute top-[3px] w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                    mqttEnabled ? "translate-x-[14px]" : "translate-x-[3px]"
+                  }`}
+                />
+              </div>
+              <span className="text-muted">Enabled</span>
+            </label>
+
+            <div>
+              <label htmlFor="mqtt-broker" className="block text-sm text-muted mb-1">
+                Broker URL
+              </label>
+              <input
+                id="mqtt-broker"
+                type="text"
+                value={mqttBroker}
+                onChange={(e) => { setMqttBroker(e.target.value); setSaveSuccess(false); }}
+                placeholder="tcp://localhost:1883"
+                disabled={!mqttEnabled}
+                className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500 disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="mqtt-topic-prefix" className="block text-sm text-muted mb-1">
+                Topic Prefix
+              </label>
+              <input
+                id="mqtt-topic-prefix"
+                type="text"
+                value={mqttTopicPrefix}
+                onChange={(e) => { setMqttTopicPrefix(e.target.value); setSaveSuccess(false); }}
+                placeholder="sentinel"
+                disabled={!mqttEnabled}
+                className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500 disabled:opacity-50"
+              />
+              <p className="mt-1 text-xs text-faint">
+                Events publish to {mqttTopicPrefix || "sentinel"}/events/&#123;camera&#125;/&#123;label&#125;
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="mqtt-username" className="block text-sm text-muted mb-1">
+                  Username
+                </label>
+                <input
+                  id="mqtt-username"
+                  type="text"
+                  value={mqttUsername}
+                  onChange={(e) => { setMqttUsername(e.target.value); setSaveSuccess(false); }}
+                  placeholder="(optional)"
+                  disabled={!mqttEnabled}
+                  autoComplete="off"
+                  className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500 disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label htmlFor="mqtt-password" className="block text-sm text-muted mb-1">
+                  Password
+                </label>
+                <input
+                  id="mqtt-password"
+                  type="password"
+                  value={mqttPassword}
+                  onChange={(e) => { setMqttPassword(e.target.value); setSaveSuccess(false); }}
+                  placeholder="(optional)"
+                  disabled={!mqttEnabled}
+                  autoComplete="off"
+                  className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500 disabled:opacity-50"
+                />
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={mqttHADiscovery}
+                onChange={(e) => { setMqttHADiscovery(e.target.checked); setSaveSuccess(false); }}
+                disabled={!mqttEnabled}
+                className="sr-only peer"
+              />
+              <div
+                className={`w-8 h-5 rounded-full relative transition-colors cursor-pointer ${
+                  mqttHADiscovery && mqttEnabled ? "bg-sentinel-500" : "bg-border"
+                } ${!mqttEnabled ? "opacity-50" : ""}`}
+              >
+                <div
+                  className={`absolute top-[3px] w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                    mqttHADiscovery ? "translate-x-[14px]" : "translate-x-[3px]"
+                  }`}
+                />
+              </div>
+              <span className={`text-muted ${!mqttEnabled ? "opacity-50" : ""}`}>
+                Home Assistant Auto-Discovery
+              </span>
+            </label>
+          </div>
+        </section>
+
+        {/* Email (SMTP) notification settings */}
+        <section className="bg-surface-raised border border-border rounded-lg p-5">
+          <h2 className="text-sm font-medium text-muted mb-1">Email (SMTP)</h2>
+          <p className="text-xs text-faint mb-4">
+            Configure SMTP server settings for email notifications.
+            Register recipient email addresses on the Notification Settings page.
+            Changes take effect after saving and restarting the server.
+          </p>
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="sm:col-span-2">
+                <label htmlFor="smtp-host" className="block text-sm text-muted mb-1">
+                  SMTP Host
+                </label>
+                <input
+                  id="smtp-host"
+                  type="text"
+                  value={smtpHost}
+                  onChange={(e) => { setSmtpHost(e.target.value); setSaveSuccess(false); }}
+                  placeholder="smtp.gmail.com"
+                  className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
+                />
+              </div>
+              <div>
+                <label htmlFor="smtp-port" className="block text-sm text-muted mb-1">
+                  Port
+                </label>
+                <input
+                  id="smtp-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={smtpPort}
+                  onChange={(e) => { setSmtpPort(parseInt(e.target.value, 10) || 587); setSaveSuccess(false); }}
+                  className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sentinel-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="smtp-username" className="block text-sm text-muted mb-1">
+                  Username
+                </label>
+                <input
+                  id="smtp-username"
+                  type="text"
+                  value={smtpUsername}
+                  onChange={(e) => { setSmtpUsername(e.target.value); setSaveSuccess(false); }}
+                  placeholder="(optional)"
+                  autoComplete="off"
+                  className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
+                />
+              </div>
+              <div>
+                <label htmlFor="smtp-password" className="block text-sm text-muted mb-1">
+                  Password
+                </label>
+                <input
+                  id="smtp-password"
+                  type="password"
+                  value={smtpPassword}
+                  onChange={(e) => { setSmtpPassword(e.target.value); setSaveSuccess(false); }}
+                  placeholder="(optional)"
+                  autoComplete="off"
+                  className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="smtp-from" className="block text-sm text-muted mb-1">
+                From Address
+              </label>
+              <input
+                id="smtp-from"
+                type="email"
+                value={smtpFrom}
+                onChange={(e) => { setSmtpFrom(e.target.value); setSaveSuccess(false); }}
+                placeholder="alerts@example.com"
+                className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
+              />
+            </div>
+
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={smtpTls}
+                onChange={(e) => { setSmtpTls(e.target.checked); setSaveSuccess(false); }}
+                className="sr-only peer"
+              />
+              <div
+                className={`w-8 h-5 rounded-full relative transition-colors cursor-pointer ${
+                  smtpTls ? "bg-sentinel-500" : "bg-border"
+                }`}
+              >
+                <div
+                  className={`absolute top-[3px] w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                    smtpTls ? "translate-x-[14px]" : "translate-x-[3px]"
+                  }`}
+                />
+              </div>
+              <span className="text-muted">Use TLS (STARTTLS)</span>
+            </label>
+          </div>
+        </section>
 
         {/* Remote Access — QR pairing for mobile app (Phase 12, CG11) */}
         <section className="bg-surface-raised border border-border rounded-lg p-5">

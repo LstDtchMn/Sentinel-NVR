@@ -68,6 +68,8 @@ export interface CameraDetail {
   updated_at: string;
   pipeline_status: PipelineStatus | null;
   zones: Zone[]; // Phase 9: detection zone polygons; backend always returns array (default [])
+  notification_cooldown_seconds: number; // per-camera notification cooldown (default 60)
+  detection_interval: number; // per-camera detection frame interval; 0 = use global default
 }
 
 /** Request body for creating/updating a camera. */
@@ -83,6 +85,8 @@ export interface CameraInput {
   onvif_user?: string;
   onvif_pass?: string;
   zones?: Zone[]; // Phase 9: when omitted, server preserves existing zones
+  notification_cooldown_seconds?: number;
+  detection_interval?: number;
 }
 
 /** A single recording segment returned by the API. */
@@ -192,7 +196,7 @@ export interface NotifToken {
   id: number;
   user_id: number;
   token: string;
-  provider: "fcm" | "apns" | "webhook";
+  provider: "fcm" | "apns" | "webhook" | "email";
   label: string;
   created_at: string;
   updated_at: string;
@@ -224,6 +228,34 @@ export interface NotifLogEntry {
   sent_at: string | null;
 }
 
+/** Result of a clip export request (POST /recordings/export). */
+export interface ExportResult {
+  export_id: string;
+  download_url: string;
+  duration_s: number;
+  size_bytes: number;
+}
+
+/** MQTT configuration (mirrors backend config.MQTTConfig). */
+export interface MQTTConfig {
+  enabled: boolean;
+  broker: string;
+  topic_prefix: string;
+  username: string;
+  password: string;
+  ha_discovery: boolean;
+}
+
+/** SMTP email notification configuration (mirrors backend config.SMTPConfig). */
+export interface SMTPConfig {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  from: string;
+  tls: boolean;
+}
+
 export interface SystemConfig {
   server: { host: string; port: number; log_level: string };
   storage: {
@@ -235,6 +267,10 @@ export interface SystemConfig {
     segment_format: string;
   };
   detection: { enabled: boolean; backend: string };
+  mqtt?: MQTTConfig;
+  notifications?: {
+    smtp: SMTPConfig;
+  };
   cameras: Array<{
     name: string;
     enabled: boolean;
@@ -540,6 +576,8 @@ class ApiClient {
     input: {
       server?: { log_level?: string };
       storage?: { hot_retention_days?: number; cold_retention_days?: number; segment_duration?: number };
+      mqtt?: Partial<MQTTConfig>;
+      notifications?: { smtp?: Partial<SMTPConfig> };
     },
     signal?: AbortSignal,
   ): Promise<SystemConfig> {
@@ -601,6 +639,24 @@ class ApiClient {
   /** Returns the URL for downloading a recording segment as an attachment. */
   downloadRecordingURL(id: number): string {
     return `${API_BASE}/recordings/${id}/download`;
+  }
+
+  /** Exports a clip from recorded segments (POST /recordings/export). */
+  exportClip(
+    input: { camera_name: string; start: string; end: string },
+    signal?: AbortSignal,
+  ): Promise<ExportResult> {
+    return this.request<ExportResult>("/recordings/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal,
+    });
+  }
+
+  /** Returns the URL for downloading an exported clip. */
+  exportDownloadURL(exportId: string): string {
+    return `${API_BASE}/recordings/export/${exportId}/download`;
   }
 
   /** Returns detection events with optional filtering and pagination (Phase 5, R3). */
@@ -702,7 +758,7 @@ class ApiClient {
 
   /** Registers (or updates the label of) a device token for push delivery. */
   createNotifToken(
-    input: { provider: "fcm" | "apns" | "webhook"; token: string; label?: string },
+    input: { provider: "fcm" | "apns" | "webhook" | "email"; token: string; label?: string },
     signal?: AbortSignal,
   ): Promise<NotifToken> {
     return this.request<NotifToken>("/notifications/tokens", {

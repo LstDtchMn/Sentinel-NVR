@@ -36,13 +36,26 @@ type ModelsConfig struct {
 }
 
 // NotificationConfig holds push notification provider settings (Phase 8, R9).
-// Set enabled: true and configure at least one provider (fcm, apns, or webhook)
+// Set enabled: true and configure at least one provider (fcm, apns, webhook, or email)
 // to receive push notifications on detection and camera events.
 type NotificationConfig struct {
 	Enabled       bool       `yaml:"enabled"`
 	RetryInterval int        `yaml:"retry_interval"` // seconds between crash-recovery scans; default 60
 	FCM           FCMConfig  `yaml:"fcm"`
 	APNs          APNsConfig `yaml:"apns"`
+	SMTP          SMTPConfig `yaml:"smtp"` // SMTP email delivery
+}
+
+// SMTPConfig holds SMTP server settings for email notification delivery.
+// When Host is non-empty, the "email" notification provider becomes available.
+// The token value for email-type notification channels is the recipient email address.
+type SMTPConfig struct {
+	Host     string `yaml:"host" json:"host"`         // SMTP server hostname, e.g. "smtp.gmail.com"
+	Port     int    `yaml:"port" json:"port"`         // SMTP server port, e.g. 587 for STARTTLS
+	Username string `yaml:"username" json:"username"` // SMTP auth username
+	Password string `yaml:"password" json:"password"` // SMTP auth password
+	From     string `yaml:"from" json:"from"`         // sender email address, e.g. "alerts@example.com"
+	TLS      bool   `yaml:"tls" json:"tls"`           // true = use STARTTLS
 }
 
 // FCMConfig holds Firebase Cloud Messaging service account credentials (Phase 8, R9).
@@ -157,6 +170,10 @@ type DetectionConfig struct {
 	ConfidenceThreshold *float64 `yaml:"confidence_threshold"` // pointer to distinguish unset from 0.0
 	InferencePort       int      `yaml:"inference_port"`     // Phase 9: port sentinel-infer HTTP server binds to; default 9099
 	InferenceBinary     string   `yaml:"inference_binary"`   // Phase 9: path to sentinel-infer binary; empty = auto-resolve
+
+	// v0.3: Minimum bounding box area filter — reject tiny detections (rain artifacts, noise).
+	// Value is a fraction of total frame area [0.0, 1.0]; default 0.03 (3%).
+	MinBBoxArea *float64 `yaml:"min_bbox_area"`
 
 	// Phase 13: Advanced AI (R11, R12)
 	FaceRecognition     FaceRecognitionConfig     `yaml:"face_recognition"`
@@ -277,6 +294,14 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("storage.segment_format %q is not supported (only \"mp4\" is tested)", cfg.Storage.SegmentFormat)
 	}
 
+	// Validate minimum bbox area is within [0.0, 1.0].
+	if cfg.Detection.MinBBoxArea != nil {
+		t := *cfg.Detection.MinBBoxArea
+		if t < 0.0 || t > 1.0 {
+			return fmt.Errorf("detection.min_bbox_area %g is out of range [0.0, 1.0]", t)
+		}
+	}
+
 	// Validate confidence threshold is within the model output range [0.0, 1.0].
 	// A value > 1.0 silently suppresses all detections; < 0.0 is undefined.
 	if cfg.Detection.ConfidenceThreshold != nil {
@@ -322,6 +347,15 @@ func Validate(cfg *Config) error {
 			}
 			if apns.BundleID == "" {
 				return fmt.Errorf("notifications.apns.bundle_id is required when key_path is set")
+			}
+		}
+		smtp := cfg.Notifications.SMTP
+		if smtp.Host != "" {
+			if smtp.Port < 1 || smtp.Port > 65535 {
+				return fmt.Errorf("notifications.smtp.port %d is out of range [1-65535]", smtp.Port)
+			}
+			if smtp.From == "" {
+				return fmt.Errorf("notifications.smtp.from is required when smtp.host is set")
 			}
 		}
 	}
@@ -424,6 +458,15 @@ func Save(path string, cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// MinBBoxAreaValue returns the effective minimum bounding box area filter,
+// defaulting to 0.03 (3% of frame area) if not explicitly configured.
+func (d *DetectionConfig) MinBBoxAreaValue() float64 {
+	if d.MinBBoxArea != nil {
+		return *d.MinBBoxArea
+	}
+	return 0.03
 }
 
 // ConfidenceThreshold returns the effective detection confidence threshold,
@@ -587,6 +630,10 @@ func setDefaults(cfg *Config) {
 	// Notification defaults (Phase 8, R9)
 	if cfg.Notifications.RetryInterval == 0 {
 		cfg.Notifications.RetryInterval = 60 // re-check pending deliveries every minute
+	}
+	// SMTP port default: 587 (STARTTLS) if host is set but port is 0
+	if cfg.Notifications.SMTP.Host != "" && cfg.Notifications.SMTP.Port == 0 {
+		cfg.Notifications.SMTP.Port = 587
 	}
 
 	// Relay defaults (Phase 12, CG11)
