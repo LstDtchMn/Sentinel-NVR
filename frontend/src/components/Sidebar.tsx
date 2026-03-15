@@ -144,6 +144,7 @@ export default function Sidebar() {
         className="fixed top-3 left-3 z-50 p-2 rounded-lg bg-surface-raised border border-border
                    text-muted hover:text-white md:hidden"
         aria-label="Open menu"
+        aria-expanded={mobileOpen}
       >
         <Menu className="w-5 h-5" />
       </button>

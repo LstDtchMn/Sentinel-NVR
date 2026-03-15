@@ -53,7 +53,8 @@ export default function Import() {
   }
 
   async function handleImport() {
-    if (!file) return;
+    if (!file || !preview) return;
+    if (!window.confirm(`Import ${preview.cameras.length} camera(s)? This cannot be undone.`)) return;
     ctrlRef.current?.abort();
     const ctrl = new AbortController();
     ctrlRef.current = ctrl;

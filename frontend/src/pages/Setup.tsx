@@ -45,7 +45,7 @@ export default function Setup() {
       onSetupComplete(result.user);
       navigate("/live", { replace: true });
     } catch (err: unknown) {
-      if ((err as Error).name === "AbortError") return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setError(
         err instanceof Error ? err.message : "Setup failed. Please try again."
       );

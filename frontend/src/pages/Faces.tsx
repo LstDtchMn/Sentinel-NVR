@@ -26,6 +26,7 @@ export default function Faces() {
   const [enrollError, setEnrollError] = useState<string | null>(null);
   const [enrollSuccess, setEnrollSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const enrollTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
 
   // Raw embedding panel (advanced)
   const [showRawPanel, setShowRawPanel] = useState(false);
@@ -56,6 +57,7 @@ export default function Faces() {
   useEffect(() => () => {
     enrollCtrlRef.current?.abort();
     manualCtrlRef.current?.abort();
+    if (enrollTimerRef.current) clearTimeout(enrollTimerRef.current);
   }, []);
 
   async function handlePhotoEnroll(e: React.FormEvent) {
@@ -78,8 +80,7 @@ export default function Faces() {
       if (fileInputRef.current) fileInputRef.current.value = "";
       setEnrollSuccess(true);
       showToast("Face enrolled successfully", "success");
-      // TODO(review): L6 — setTimeout handle not stored; not cancelled on unmount
-      setTimeout(() => setEnrollSuccess(false), 3_000);
+      enrollTimerRef.current = setTimeout(() => setEnrollSuccess(false), 3_000);
     } catch (err) {
       if (ctrl.signal.aborted) return;
       setEnrollError(err instanceof Error ? err.message : "Enrollment failed");

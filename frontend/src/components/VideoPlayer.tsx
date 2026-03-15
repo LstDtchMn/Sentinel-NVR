@@ -76,8 +76,11 @@ export default function VideoPlayer({
   }, [cameraName]);
 
   /** Detect supported codecs via MediaSource.isTypeSupported(). */
-  // TODO(review): L4 — guard MediaSource availability for iOS Safari/WebKit
   const getSupportedCodecs = useCallback(() => {
+    if (typeof MediaSource === 'undefined') {
+      // Fallback for browsers without MediaSource API (iOS Safari, older WebKit)
+      return [];
+    }
     return CODEC_CANDIDATES.filter((codec) =>
       MediaSource.isTypeSupported(`video/mp4; codecs="${codec}"`)
     );

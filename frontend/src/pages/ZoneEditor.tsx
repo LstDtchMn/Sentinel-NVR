@@ -342,20 +342,20 @@ export default function ZoneEditor() {
   };
 
   // Escape key cancels in-progress drawing
-  // TODO(review): L5 — Escape handler reads drawState from closure (stale closure risk); use drawStateRef
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && drawState === "drawing") {
+      if (e.key === "Escape" && drawStateRef.current === "drawing") {
         setPendingPoints([]);
         pendingPointsRef.current = [];
         clickTimestampsRef.current = [];
         setDrawState("idle");
+        drawStateRef.current = "idle";
         setMousePos(null);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [drawState]);
+  }, []);
 
   // ── Zone management ────────────────────────────────────────────────────────
 
