@@ -58,28 +58,61 @@ export default function LiveView() {
     };
   }, [fetchCameras]);
 
-  // Keep a ref to focusedCamera so the Escape handler can read the current value
-  // without being in the listener's dependency array — avoids tearing down and
-  // re-adding the global keydown listener on every camera focus change.
+  // Refs for keyboard shortcut handler — read current values without re-registering
+  // the listener on every state change.
   const focusedCameraRef = useRef<string | null>(null);
-  useEffect(() => {
-    focusedCameraRef.current = focusedCamera;
-  }, [focusedCamera]);
+  const displayCamerasRef = useRef<CameraDetail[] | undefined>(undefined);
+  useEffect(() => { focusedCameraRef.current = focusedCamera; }, [focusedCamera]);
 
-  // Escape key exits Focus Mode — registered once on mount, never re-registered.
+  // Keyboard shortcuts: Escape (exit focus), F (toggle fullscreen), 1-9 (focus by index).
+  // Registered once on mount — reads mutable values from refs to stay stable.
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && focusedCameraRef.current) {
-        setFocusedCamera(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      const cams = displayCamerasRef.current;
+
+      switch (e.key) {
+        case "Escape":
+          if (focusedCameraRef.current) {
+            setFocusedCamera(null);
+          }
+          break;
+        case "f":
+        case "F":
+          if (focusedCameraRef.current) {
+            // Toggle browser fullscreen on the focused camera container
+            const focusEl = document.querySelector("[data-focused-camera]");
+            if (focusEl) {
+              if (document.fullscreenElement) {
+                document.exitFullscreen().catch(() => {});
+              } else {
+                focusEl.requestFullscreen().catch(() => {});
+              }
+            }
+          }
+          break;
+        default: {
+          // 1-9: focus camera by index
+          const num = parseInt(e.key, 10);
+          if (num >= 1 && num <= 9 && cams && cams.length >= num) {
+            setFocusedCamera(cams[num - 1].name);
+          }
+          break;
+        }
       }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   // Show all enabled cameras — VideoPlayer handles connection errors gracefully.
   // Cameras in error/idle state get a placeholder tile so users see them.
   const displayCameras = cameras?.filter((cam) => cam.enabled);
+  // Keep ref in sync for keyboard shortcut handler
+  displayCamerasRef.current = displayCameras;
 
   // Auto-clear focus when the focused camera is deleted or disabled so the user
   // is not left with a blank screen and no recovery path.
@@ -143,7 +176,7 @@ export default function LiveView() {
         // Camera may have been disabled/deleted since focus — fall back to grid
         if (!cam) return null;
         return (
-          <div className="flex-1 p-3">
+          <div className="flex-1 p-3" data-focused-camera>
             <FocusedTile camera={cam} onClose={() => setFocusedCamera(null)} />
           </div>
         );

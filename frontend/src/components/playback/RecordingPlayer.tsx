@@ -34,6 +34,10 @@ export interface RecordingPlayerHandle {
   seekTo(seconds: number): void;
   /** Store an offset applied when the next segment finishes loading (cross-segment seek). */
   setInitialSeek(seconds: number): void;
+  /** Toggle play/pause on the current video. */
+  togglePlayPause(): void;
+  /** Seek relative to current position (positive = forward, negative = backward). */
+  seekRelative(delta: number): void;
 }
 
 const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
@@ -209,13 +213,22 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
     video.currentTime = Math.max(0, Math.min(seconds, video.duration || 0));
   }, []);
 
-  // Expose seekTo and setInitialSeek to parent via ref (R6 timeline click-to-seek).
+  // Seek relative to current position
+  const seekRelative = useCallback((delta: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = Math.max(0, Math.min(video.currentTime + delta, video.duration || 0));
+  }, []);
+
+  // Expose seekTo, setInitialSeek, togglePlayPause, seekRelative to parent via ref.
   useImperativeHandle(ref, () => ({
     seekTo,
     setInitialSeek(seconds: number) {
       pendingSeekRef.current = seconds;
     },
-  }), [seekTo]);
+    togglePlayPause: handlePlayPause,
+    seekRelative,
+  }), [seekTo, handlePlayPause, seekRelative]);
 
   // Format time displays
   const wallClock = segment ? formatWallClock(segment.start_time, videoTime) : "--:--:--";
