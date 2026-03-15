@@ -152,7 +152,11 @@ export default function Cameras() {
   return (
     <div className="p-8">
       <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
-        <h1 className="text-2xl font-semibold">Cameras</h1>
+        <h1 className="text-2xl font-semibold">
+          Cameras{cameras !== null && cameras.length > 0 && (
+            <span className="text-sm text-muted font-normal ml-2">({cameras.length})</span>
+          )}
+        </h1>
         {!showForm && !editingCamera && (
           <div className="flex items-center gap-3">
             <button

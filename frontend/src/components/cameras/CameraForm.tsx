@@ -66,6 +66,22 @@ export function AddCameraForm({
   const [detect, setDetect] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [streamUrlWarning, setStreamUrlWarning] = useState<string | null>(null);
+
+  const VALID_SCHEMES = ["rtsp://", "rtsps://", "rtmp://", "http://", "https://"];
+
+  const validateStreamUrl = (url: string) => {
+    if (!url.trim()) {
+      setStreamUrlWarning(null);
+      return;
+    }
+    const lower = url.trim().toLowerCase();
+    if (!VALID_SCHEMES.some((s) => lower.startsWith(s))) {
+      setStreamUrlWarning("URL must start with rtsp://, rtsps://, rtmp://, http://, or https://");
+    } else {
+      setStreamUrlWarning(null);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -122,8 +138,12 @@ export function AddCameraForm({
               onChange={(e) => setName(e.target.value)}
               placeholder="Front Door"
               required
+              maxLength={64}
               className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
             />
+            {name.length > 50 && (
+              <p className="mt-1 text-xs text-muted">{name.length}/64</p>
+            )}
           </div>
           <div>
             <label htmlFor="cam-main-stream" className="block text-sm text-muted mb-1">Main Stream URL *</label>
@@ -132,14 +152,19 @@ export function AddCameraForm({
               type="text"
               autoComplete="off"
               value={mainStream}
-              onChange={(e) => setMainStream(e.target.value)}
+              onChange={(e) => { setMainStream(e.target.value); setStreamUrlWarning(null); }}
+              onBlur={(e) => validateStreamUrl(e.target.value)}
               placeholder="rtsp://user:pass@192.168.1.100:554/stream1"
               required
               className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
             />
-            <p className="mt-1 text-xs text-faint">
-              Supports rtsp://, rtsps://, rtmp://, and http:// / https:// (MJPEG)
-            </p>
+            {streamUrlWarning ? (
+              <p className="mt-1 text-xs text-amber-400">{streamUrlWarning}</p>
+            ) : (
+              <p className="mt-1 text-xs text-faint">
+                Supports rtsp://, rtsps://, rtmp://, and http:// / https:// (MJPEG)
+              </p>
+            )}
           </div>
         </div>
 
