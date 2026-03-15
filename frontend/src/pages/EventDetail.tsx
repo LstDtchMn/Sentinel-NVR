@@ -14,25 +14,8 @@ import {
   ImageOff,
 } from "lucide-react";
 import { api, type EventRecord, type CameraDetail } from "../api/client";
-
-function confidenceColor(c: number): string {
-  if (c >= 0.8) return "bg-green-500/20 text-green-400";
-  if (c >= 0.5) return "bg-yellow-500/20 text-yellow-400";
-  return "bg-red-500/20 text-red-400";
-}
-
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleString(undefined, {
-    weekday: "short",
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
+import { eventTypeBadge, confidenceColor } from "../utils/events";
+import { formatEventTimeLong } from "../utils/time";
 
 function EventTypeIcon({ type }: { type: string }) {
   if (type === "detection") return <ShieldAlert className="w-5 h-5 text-sentinel-500" />;
@@ -51,19 +34,6 @@ function eventTypeLabel(type: string): string {
     case "recording.started": return "Recording started";
     case "recording.stopped": return "Recording stopped";
     default: return type;
-  }
-}
-
-function eventTypeBadgeClass(type: string): string {
-  switch (type) {
-    case "detection": return "bg-blue-500/20 text-blue-400";
-    case "face_match": return "bg-purple-500/20 text-purple-400";
-    case "audio_detection": return "bg-amber-500/20 text-amber-400";
-    case "camera.connected":
-    case "camera.disconnected": return "bg-orange-500/20 text-orange-400";
-    case "recording.started":
-    case "recording.stopped": return "bg-green-500/20 text-green-400";
-    default: return "bg-gray-500/20 text-gray-400";
   }
 }
 
@@ -188,9 +158,14 @@ export default function EventDetail() {
         <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
           <dt className="text-muted">Event type</dt>
           <dd>
-            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${eventTypeBadgeClass(event.type)}`}>
-              {eventTypeLabel(event.type)}
-            </span>
+            {(() => {
+              const badge = eventTypeBadge(event.type);
+              return (
+                <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${badge.bg} ${badge.text}`}>
+                  {eventTypeLabel(event.type)}
+                </span>
+              );
+            })()}
           </dd>
 
           {event.label && event.label !== event.type && (
@@ -201,7 +176,7 @@ export default function EventDetail() {
           )}
 
           <dt className="text-muted">Timestamp</dt>
-          <dd>{formatTime(event.start_time)}</dd>
+          <dd>{formatEventTimeLong(event.start_time)}</dd>
 
           {event.camera_id !== null && (
             <>

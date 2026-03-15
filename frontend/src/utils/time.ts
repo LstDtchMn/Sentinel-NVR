@@ -70,3 +70,61 @@ export function formatHour(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   return `${String(h).padStart(2, "0")}:00`;
 }
+
+/** Compact event timestamp — "Feb 22, 10:34:12 AM" (used in event cards). */
+export function formatEventTime(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+/** Verbose event timestamp — "Sat, Feb 22, 2026, 10:34:12 AM" (used in event detail). */
+export function formatEventTimeLong(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+/** Convert Go duration string (e.g. "121h33m56s") to human-friendly "5d 1h 33m". */
+export function formatUptime(raw: string): string {
+  const h = raw.match(/(\d+)h/);
+  const m = raw.match(/(\d+)m/);
+  const s = raw.match(/(\d+)s/);
+  const hours = h ? parseInt(h[1], 10) : 0;
+  const mins = m ? parseInt(m[1], 10) : 0;
+  const secs = s ? parseInt(s[1], 10) : 0;
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    const remH = hours % 24;
+    return remH > 0 ? `${days}d ${remH}h ${mins}m` : `${days}d ${mins}m`;
+  }
+  if (hours >= 1) return `${hours}h ${mins}m`;
+  if (mins >= 1) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
+/** Format an ISO timestamp as a relative time string (e.g. "2h ago"). */
+export function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 0) return "just now";
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}

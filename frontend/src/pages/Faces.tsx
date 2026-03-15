@@ -8,10 +8,13 @@ import { useEffect, useState, useRef } from "react";
 import { Users, Trash2, UserPlus, Upload, ChevronDown, ChevronUp } from "lucide-react";
 import { api, FaceRecord } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 export default function Faces() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const { toast, showToast, dismissToast } = useToast();
   const [faces, setFaces] = useState<FaceRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +77,7 @@ export default function Faces() {
       setEnrollFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
       setEnrollSuccess(true);
+      showToast("Face enrolled successfully", "success");
       // TODO(review): L6 — setTimeout handle not stored; not cancelled on unmount
       setTimeout(() => setEnrollSuccess(false), 3_000);
     } catch (err) {
@@ -107,6 +111,7 @@ export default function Faces() {
       setFaces((prev) => [...prev, face]);
       setRawName("");
       setRawEmbedding("");
+      showToast("Face enrolled via embedding", "success");
     } catch (err) {
       setRawError(err instanceof Error ? err.message : "Failed to enroll face");
     } finally {
@@ -124,9 +129,12 @@ export default function Faces() {
       await api.deleteFace(id, ctrl.signal);
       if (ctrl.signal.aborted) return;
       setFaces((prev) => prev.filter((f) => f.id !== id));
+      showToast("Face deleted", "success");
     } catch (err) {
       if (ctrl.signal.aborted) return;
-      setError(err instanceof Error ? err.message : "Delete failed");
+      const msg = err instanceof Error ? err.message : "Delete failed";
+      setError(msg);
+      showToast(msg, "error");
     }
   }
 
@@ -298,6 +306,7 @@ export default function Faces() {
           ))}
         </div>
       )}
+      {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </div>
   );
 }

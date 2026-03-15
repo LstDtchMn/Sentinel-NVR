@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import { api, HealthStatus, CameraDetail, CameraState } from "../api/client";
 import { Activity, Database, Cpu, Film, HardDrive, Radio, Check, Minus } from "lucide-react";
+import { formatUptime, formatRelativeTime } from "../utils/time";
 
 type StatColor = "green" | "blue" | "purple" | "cyan" | "yellow" | "red";
 
@@ -18,38 +19,6 @@ const STAT_COLOR_MAP: Record<StatColor, string> = {
   purple: "text-status-accent",
   cyan: "text-status-highlight",
 };
-
-/** Convert Go duration string (e.g. "121h33m56s") to human-friendly "5d 1h 33m". */
-function formatUptime(raw: string): string {
-  const h = raw.match(/(\d+)h/);
-  const m = raw.match(/(\d+)m/);
-  const s = raw.match(/(\d+)s/);
-  const hours = h ? parseInt(h[1], 10) : 0;
-  const mins = m ? parseInt(m[1], 10) : 0;
-  const secs = s ? parseInt(s[1], 10) : 0;
-  if (hours >= 24) {
-    const days = Math.floor(hours / 24);
-    const remH = hours % 24;
-    return remH > 0 ? `${days}d ${remH}h ${mins}m` : `${days}d ${mins}m`;
-  }
-  if (hours >= 1) return `${hours}h ${mins}m`;
-  if (mins >= 1) return `${mins}m ${secs}s`;
-  return `${secs}s`;
-}
-
-/** Format an ISO timestamp as a relative time string (e.g. "2h ago"). */
-function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 0) return "just now";
-  const secs = Math.floor(diff / 1000);
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
 
 const STATUS_BADGE_COLORS: Record<CameraState, { bg: string; text: string }> = {
   recording: { bg: "bg-green-900/30", text: "text-green-400" },

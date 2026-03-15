@@ -184,19 +184,26 @@ export default function Settings() {
       setNewRuleCameraId("");
       setNewRuleEventType("");
       setNewRuleDays(30);
+      showToast("Retention rule added", "success");
     } catch (err) {
-      setRetentionError(err instanceof Error ? err.message : "Failed to create rule");
+      const msg = err instanceof Error ? err.message : "Failed to create rule";
+      setRetentionError(msg);
+      showToast(msg, "error");
     } finally {
       setRetentionSubmitting(false);
     }
   };
 
   const handleDeleteRetentionRule = async (id: number) => {
+    if (!window.confirm("Remove this retention rule? This cannot be undone.")) return;
     try {
       await api.deleteRetentionRule(id);
       setRetentionRules((prev) => prev.filter((r) => r.id !== id));
+      showToast("Retention rule removed", "success");
     } catch (err) {
-      setRetentionError(err instanceof Error ? err.message : "Failed to delete rule");
+      const msg = err instanceof Error ? err.message : "Failed to delete rule";
+      setRetentionError(msg);
+      showToast(msg, "error");
     }
   };
 

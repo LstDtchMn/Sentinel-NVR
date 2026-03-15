@@ -104,8 +104,11 @@ export default function NotificationSettings() {
     try {
       await api.deleteNotifToken(id);
       setTokens((prev) => prev.filter((t) => t.id !== id));
+      showToast("Channel removed", "success");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to remove token");
+      const msg = err instanceof Error ? err.message : "Failed to remove token";
+      setError(msg);
+      showToast(msg, "error");
     }
   }
 
@@ -141,8 +144,11 @@ export default function NotificationSettings() {
     try {
       await api.deleteNotifPref(id);
       setPrefs((prev) => prev.filter((p) => p.id !== id));
+      showToast("Rule removed", "success");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to remove preference");
+      const msg = err instanceof Error ? err.message : "Failed to remove preference";
+      setError(msg);
+      showToast(msg, "error");
     }
   }
 

@@ -7,6 +7,8 @@ import { useEffect, useState, useRef } from "react";
 import { Box, Download, Upload, Trash2, CheckCircle, Loader2 } from "lucide-react";
 import { api, ModelEntry } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return "—";
@@ -19,6 +21,7 @@ function formatSize(bytes: number): string {
 export default function Models() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const { toast, showToast, dismissToast } = useToast();
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -58,8 +61,11 @@ export default function Models() {
       await api.downloadModel(filename);
       // TODO(review): L1 — loadModels post-mutation lacks AbortController/unmount guard
       await loadModels();
+      showToast("Model downloaded", "success");
     } catch (err: any) {
-      setError(err?.message ?? "Download failed");
+      const msg = err?.message ?? "Download failed";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setDownloading(null);
     }
@@ -74,21 +80,27 @@ export default function Models() {
       setUploadFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
       await loadModels();
+      showToast("Model uploaded", "success");
     } catch (err: any) {
-      setUploadError(err?.message ?? "Upload failed");
+      const msg = err?.message ?? "Upload failed";
+      setUploadError(msg);
+      showToast(msg, "error");
     } finally {
       setUploading(false);
     }
   }
 
   async function handleDelete(filename: string) {
-    if (!confirm(`Delete model "${filename}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete model "${filename}"? This cannot be undone.`)) return;
     try {
       setError(null);
       await api.deleteModel(filename);
       await loadModels();
+      showToast("Model deleted", "success");
     } catch (err: any) {
-      setError(err?.message ?? "Delete failed");
+      const msg = err?.message ?? "Delete failed";
+      setError(msg);
+      showToast(msg, "error");
     }
   }
 
@@ -225,6 +237,7 @@ export default function Models() {
           </div>
         </section>
       )}
+      {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </div>
   );
 }

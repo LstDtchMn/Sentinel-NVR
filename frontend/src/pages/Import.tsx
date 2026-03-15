@@ -7,12 +7,15 @@ import { useState, useRef, useEffect } from "react";
 import { Upload, FileUp, CheckCircle, AlertTriangle, XCircle } from "lucide-react";
 import { api, ImportResult, ImportExecuteResult } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 type ImportFormat = "blue_iris" | "frigate";
 
 export default function Import() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const { toast, showToast, dismissToast } = useToast();
 
   const [format, setFormat] = useState<ImportFormat>("blue_iris");
   const [file, setFile] = useState<File | null>(null);
@@ -65,10 +68,13 @@ export default function Import() {
       setResult(res);
       setPreview(null);
       setLoading(false);
+      showToast(`Imported ${res.imported} camera${res.imported === 1 ? "" : "s"}`, "success");
     } catch (err) {
       if (ctrl.signal.aborted) return;
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : "Import failed");
+      const msg = err instanceof Error ? err.message : "Import failed";
+      setError(msg);
+      showToast(msg, "error");
       setLoading(false);
     }
   }
@@ -257,6 +263,7 @@ export default function Import() {
           )}
         </div>
       )}
+      {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </div>
   );
 }

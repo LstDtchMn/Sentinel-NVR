@@ -6,52 +6,20 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Trash2, ImageOff, ShieldAlert, Camera, User, Volume2 } from "lucide-react";
 import { api, EventRecord } from "../../api/client";
+import { eventTypeBadge, confidenceColor } from "../../utils/events";
+import { formatEventTime } from "../../utils/time";
+import Toast from "../Toast";
+import { useToast } from "../../hooks/useToast";
 
 interface Props {
   event: EventRecord;
   onDelete: (id: number) => void;
 }
 
-function eventTypeBadge(type: string): { bg: string; text: string; label: string } {
-  const label = type.replace(/[._]/g, " ").replace(/^\w/, (c) => c.toUpperCase());
-  switch (type) {
-    case "detection":
-      return { bg: "bg-blue-500/20", text: "text-blue-400", label };
-    case "face_match":
-      return { bg: "bg-purple-500/20", text: "text-purple-400", label };
-    case "audio_detection":
-      return { bg: "bg-amber-500/20", text: "text-amber-400", label };
-    case "camera.connected":
-    case "camera.disconnected":
-      return { bg: "bg-orange-500/20", text: "text-orange-400", label };
-    case "recording.started":
-    case "recording.stopped":
-      return { bg: "bg-green-500/20", text: "text-green-400", label };
-    default:
-      return { bg: "bg-gray-500/20", text: "text-gray-400", label };
-  }
-}
-
-function confidenceColor(c: number): string {
-  if (c >= 0.8) return "bg-green-500/20 text-green-400";
-  if (c >= 0.5) return "bg-yellow-500/20 text-yellow-400";
-  return "bg-red-500/20 text-red-400";
-}
-
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
 export default function EventCard({ event, onDelete }: Props) {
   const [imgError, setImgError] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const { toast, showToast, dismissToast } = useToast();
 
   const hasThumbnail = event.thumbnail !== "" && !imgError;
 
@@ -62,8 +30,8 @@ export default function EventCard({ event, onDelete }: Props) {
     try {
       await api.deleteEvent(event.id);
       onDelete(event.id);
-    } catch {
-      // TODO(review): L3 — show error to user on delete failure
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to delete event", "error");
       setDeleting(false);
     }
   }
@@ -135,8 +103,9 @@ export default function EventCard({ event, onDelete }: Props) {
         </div>
 
         {/* Timestamp */}
-        <p className="text-xs text-faint">{formatTime(event.start_time)}</p>
+        <p className="text-xs text-faint">{formatEventTime(event.start_time)}</p>
       </div>
+      {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </Link>
   );
 }
