@@ -16,7 +16,7 @@ const EVENT_TYPES = [
   { value: "camera.connected", label: "Camera connected" },
 ];
 
-const PROVIDERS = ["fcm", "apns", "webhook"] as const;
+const PROVIDERS = ["fcm", "apns", "webhook", "email"] as const;
 
 export default function NotificationSettings() {
   const [tokens, setTokens] = useState<NotifToken[]>([]);
@@ -31,7 +31,7 @@ export default function NotificationSettings() {
   const [testingTokenId, setTestingTokenId] = useState<number | null>(null);
 
   // New token form state
-  const [newProvider, setNewProvider] = useState<"fcm" | "apns" | "webhook">("webhook");
+  const [newProvider, setNewProvider] = useState<"fcm" | "apns" | "webhook" | "email">("webhook");
   const [newToken, setNewToken] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [savingToken, setSavingToken] = useState(false);
@@ -258,7 +258,7 @@ export default function NotificationSettings() {
                 </select>
                 <input
                   type="text"
-                  placeholder={newProvider === "webhook" ? "https://your-webhook-url/alert" : newProvider === "fcm" ? "FCM device token" : "APNs device token"}
+                  placeholder={newProvider === "webhook" ? "https://your-webhook-url/alert" : newProvider === "email" ? "recipient@example.com" : newProvider === "fcm" ? "FCM device token" : "APNs device token"}
                   value={newToken}
                   onChange={(e) => setNewToken(e.target.value)}
                   required

@@ -276,6 +276,12 @@ func main() {
 		// Webhook sender is always available; no credential file required.
 		notifSenders["webhook"] = notification.NewWebhookSender()
 
+		// Email sender: requires SMTP host to be configured.
+		if cfg.Notifications.SMTP.Host != "" {
+			notifSenders["email"] = notification.NewEmailSender(cfg.Notifications.SMTP)
+			logger.Info("email (SMTP) sender initialized", "host", cfg.Notifications.SMTP.Host, "port", cfg.Notifications.SMTP.Port)
+		}
+
 		notifService = notification.NewService(notifRepo, notifSenders, bus, logger, database)
 		notifService.Start()
 		logger.Info("notification service started",

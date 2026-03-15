@@ -34,10 +34,10 @@ func (s *Server) handleCreateNotifToken(c *gin.Context) {
 		return
 	}
 	switch req.Provider {
-	case "fcm", "apns", "webhook":
+	case "fcm", "apns", "webhook", "email":
 		// valid
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be fcm, apns, or webhook"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be fcm, apns, webhook, or email"})
 		return
 	}
 
