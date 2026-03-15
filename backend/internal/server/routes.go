@@ -92,6 +92,7 @@ func (s *Server) registerRoutes() {
 		protected.PUT("/cameras/:name", s.handleUpdateCamera)
 		protected.DELETE("/cameras/:name", s.handleDeleteCamera)
 		protected.POST("/cameras/:name/restart", s.handleRestartCamera)
+		protected.PATCH("/cameras/:name/rename", s.handleRenameCamera)
 
 		// Test camera stream connectivity
 		protected.POST("/cameras/test-stream", s.handleTestStream)
@@ -115,10 +116,15 @@ func (s *Server) registerRoutes() {
 		// Storage stats (Phase 10, R13) — aggregate used_bytes per tier
 		protected.GET("/storage/stats", s.handleStorageStats)
 
+		// Clip export
+		protected.POST("/recordings/export", s.handleExportClip)
+		protected.GET("/recordings/export/:id/download", s.handleExportDownload)
+
 		// Recording management (Phase 2)
 		protected.GET("/recordings", s.handleListRecordings)
 		protected.GET("/recordings/:id", s.handleGetRecording)
 		protected.GET("/recordings/:id/play", s.handlePlayRecording)
+		protected.GET("/recordings/:id/download", s.handleDownloadRecording)
 		protected.DELETE("/recordings/:id", s.handleDeleteRecording)
 
 		// Notification management (Phase 8, R9)
@@ -177,6 +183,20 @@ func (s *Server) registerRoutes() {
 		// Remote access (Phase 12, CG11, R8)
 		protected.GET("/relay/ice-servers", s.handleRelayICEServers)
 		protected.POST("/pairing/qr", s.handlePairingQR)
+
+		// Database backup management (admin-only)
+		protected.GET("/admin/backups", s.handleListBackups)
+		protected.POST("/admin/backup", s.handleTriggerBackup)
+
+		// User management (admin-only)
+		adminUsers := protected.Group("/admin/users")
+		{
+			adminUsers.GET("", s.handleListUsers)
+			adminUsers.POST("", s.handleCreateUser)
+			adminUsers.DELETE("/:id", s.handleDeleteUser)
+			adminUsers.PUT("/:id/role", s.handleUpdateUserRole)
+			adminUsers.PUT("/:id/password", s.handleUpdateUserPassword)
+		}
 	}
 
 	// Public pairing redeem — mobile app has no auth session when it calls this (Phase 12, CG11).

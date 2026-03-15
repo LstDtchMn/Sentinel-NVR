@@ -45,8 +45,8 @@ func TestSetDefaults(t *testing.T) {
 	if cfg.Detection.Backend != "remote" {
 		t.Errorf("Detection.Backend = %q, want %q", cfg.Detection.Backend, "remote")
 	}
-	if cfg.Detection.FrameInterval != 5 {
-		t.Errorf("Detection.FrameInterval = %d, want 5", cfg.Detection.FrameInterval)
+	if cfg.Detection.FrameInterval != 1 {
+		t.Errorf("Detection.FrameInterval = %d, want 1", cfg.Detection.FrameInterval)
 	}
 	if cfg.Auth.AccessTokenTTL != 900 {
 		t.Errorf("Auth.AccessTokenTTL = %d, want 900", cfg.Auth.AccessTokenTTL)

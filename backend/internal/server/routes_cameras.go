@@ -24,32 +24,35 @@ import (
 
 // cameraInput is the request body for creating/updating a camera.
 type cameraInput struct {
-	Name       string          `json:"name"`
-	Enabled    *bool           `json:"enabled"`
-	MainStream string          `json:"main_stream"`
-	SubStream  string          `json:"sub_stream"`
-	Record     *bool           `json:"record"`
-	Detect     *bool           `json:"detect"`
-	ONVIFHost  string          `json:"onvif_host"`
-	ONVIFPort  int             `json:"onvif_port"`
-	ONVIFUser  string          `json:"onvif_user"`
-	ONVIFPass  string          `json:"onvif_pass"`
-	Zones      json.RawMessage `json:"zones"` // Phase 9: nil = preserve existing zones (manager handles)
+	Name                 string          `json:"name"`
+	Enabled              *bool           `json:"enabled"`
+	MainStream           string          `json:"main_stream"`
+	SubStream            string          `json:"sub_stream"`
+	Record               *bool           `json:"record"`
+	Detect               *bool           `json:"detect"`
+	ONVIFHost            string          `json:"onvif_host"`
+	ONVIFPort            int             `json:"onvif_port"`
+	ONVIFUser            string          `json:"onvif_user"`
+	ONVIFPass            string          `json:"onvif_pass"`
+	Zones                json.RawMessage `json:"zones"` // Phase 9: nil = preserve existing zones (manager handles)
+	NotificationCooldown *int            `json:"notification_cooldown_seconds"`
+	DetectionInterval    *int            `json:"detection_interval"`
 }
 
 func (ci *cameraInput) toRecord() *camera.CameraRecord {
 	rec := &camera.CameraRecord{
-		Name:       ci.Name,
-		Enabled:    true, // default
-		MainStream: ci.MainStream,
-		SubStream:  ci.SubStream,
-		Record:     true, // default
-		Detect:     false,
-		ONVIFHost:  ci.ONVIFHost,
-		ONVIFPort:  ci.ONVIFPort,
-		ONVIFUser:  ci.ONVIFUser,
-		ONVIFPass:  ci.ONVIFPass,
-		Zones:      normalizeZonesRaw(ci.Zones), // nil when not provided or "null" — manager preserves existing zones
+		Name:                 ci.Name,
+		Enabled:              true, // default
+		MainStream:           ci.MainStream,
+		SubStream:            ci.SubStream,
+		Record:               true, // default
+		Detect:               false,
+		ONVIFHost:            ci.ONVIFHost,
+		ONVIFPort:            ci.ONVIFPort,
+		ONVIFUser:            ci.ONVIFUser,
+		ONVIFPass:            ci.ONVIFPass,
+		Zones:                normalizeZonesRaw(ci.Zones), // nil when not provided or "null" — manager preserves existing zones
+		NotificationCooldown: 60, // default 60 seconds
 	}
 	if ci.Enabled != nil {
 		rec.Enabled = *ci.Enabled
@@ -59,6 +62,12 @@ func (ci *cameraInput) toRecord() *camera.CameraRecord {
 	}
 	if ci.Detect != nil {
 		rec.Detect = *ci.Detect
+	}
+	if ci.NotificationCooldown != nil {
+		rec.NotificationCooldown = *ci.NotificationCooldown
+	}
+	if ci.DetectionInterval != nil {
+		rec.DetectionInterval = *ci.DetectionInterval
 	}
 	return rec
 }
@@ -223,6 +232,54 @@ func (s *Server) handleDeleteCamera(c *gin.Context) {
 
 	s.logger.Info("camera deleted", "name", name, "user", c.GetString("username"))
 	c.Status(http.StatusNoContent)
+}
+
+// handleRenameCamera renames an existing camera.
+// PATCH /api/v1/cameras/:name/rename — admin-only.
+// Body: { "new_name": "New Camera Name" }
+func (s *Server) handleRenameCamera(c *gin.Context) {
+	if !s.requireAdmin(c) {
+		return
+	}
+	oldName := c.Param("name")
+
+	var input struct {
+		NewName string `json:"new_name"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if input.NewName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_name is required"})
+		return
+	}
+
+	if err := camera.ValidateCameraName(input.NewName); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	result, err := s.camManager.RenameCamera(ctx, oldName, input.NewName)
+	if errors.Is(err, camera.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "camera not found"})
+		return
+	}
+	if errors.Is(err, camera.ErrDuplicate) {
+		c.JSON(http.StatusConflict, gin.H{"error": "a camera with that name already exists"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to rename camera", "old_name", oldName, "new_name", input.NewName, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	s.logger.Info("camera renamed", "old_name", oldName, "new_name", input.NewName, "user", c.GetString("username"))
+	c.JSON(http.StatusOK, result)
 }
 
 // handleRestartCamera stops and restarts a camera's pipeline without modifying the DB.

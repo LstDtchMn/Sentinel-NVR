@@ -166,6 +166,8 @@ func setupTestServer(t *testing.T) *testEnv {
 		bus,
 		notifRepo,
 		nil, // notifSenders
+		nil, // backupMgr
+		nil, // exportService
 		logger,
 	)
 

@@ -270,9 +270,9 @@ func TestMigrations_VersionsCoverExpected(t *testing.T) {
 	}
 	defer d.Close()
 
-	// The project has migrations 001 through 014 (no 015 yet).
+	// The project has migrations 001 through 015.
 	// Verify all expected versions are present.
-	expected := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+	expected := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 	for _, v := range expected {
 		var count int
 		err := d.QueryRow("SELECT COUNT(*) FROM _migrations WHERE version = ?", v).Scan(&count)

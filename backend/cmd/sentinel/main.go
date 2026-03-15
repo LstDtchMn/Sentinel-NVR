@@ -19,16 +19,19 @@ import (
 	"math/big"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/auth"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/backup"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/camera"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/db"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/detection"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/mqtt"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/notification"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/server"
@@ -173,6 +176,28 @@ func main() {
 	recRepo := recording.NewRepository(database)
 	logger.Info("recording repository initialized")
 
+	// Initialize clip export service — writes temporary MP4 clips to a subdirectory of hot storage.
+	exportDir := filepath.Join(cfg.Storage.HotPath, "_exports")
+	exportService := recording.NewExportService(recRepo, exportDir, logger)
+	logger.Info("export service initialized", "export_dir", exportDir)
+
+	// Initialize MQTT event bridge when configured.
+	var mqttPub *mqtt.Publisher
+	if cfg.MQTT.Enabled {
+		if cfg.MQTT.Broker == "" {
+			logger.Error("mqtt.broker must be set when mqtt.enabled=true")
+			os.Exit(1)
+		}
+		mqttPub = mqtt.NewPublisher(cfg.MQTT.Broker, cfg.MQTT.TopicPrefix, cfg.MQTT.Username, cfg.MQTT.Password, bus, logger)
+		if err := mqttPub.Start(); err != nil {
+			logger.Error("failed to start MQTT publisher", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("MQTT publisher started", "broker", cfg.MQTT.Broker, "prefix", cfg.MQTT.TopicPrefix)
+	} else {
+		logger.Info("MQTT disabled (mqtt.enabled=false)")
+	}
+
 	// Start event persister — writes all events to SQLite and marks has_clip (Phase 6).
 	// Started after recRepo so clip association queries are available immediately.
 	var persisterWg sync.WaitGroup
@@ -251,7 +276,7 @@ func main() {
 		// Webhook sender is always available; no credential file required.
 		notifSenders["webhook"] = notification.NewWebhookSender()
 
-		notifService = notification.NewService(notifRepo, notifSenders, bus, logger)
+		notifService = notification.NewService(notifRepo, notifSenders, bus, logger, database)
 		notifService.Start()
 		logger.Info("notification service started",
 			"providers", func() []string {
@@ -336,9 +361,16 @@ func main() {
 	// Initialize model manager (R10).
 	modelMgr := models.NewManager(cfg.Models.Dir, cfg.Models.BaseURL, logger)
 
+	// Initialize and start database backup manager.
+	// Backups are stored alongside the database file in a "backups" subdirectory.
+	// Keeps 5 most recent backups, runs every 6 hours.
+	backupDir := filepath.Join(filepath.Dir(cfg.Database.Path), "backups")
+	backupMgr := backup.New(database, backupDir, 5, 6*time.Hour, logger)
+	backupMgr.Start()
+
 	// Start HTTP server (CG2, CG7).
 	serverErr := make(chan error, 1)
-	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, modelMgr, g2rClient, bus, notifRepo, notifSenders, logger)
+	srv := server.New(cfg, *configPath, version, database, authService, oidcProvider, &logLevelVar, camManager, camRepo, recRepo, detRepo, faceRepo, faceRecognizer, retentionRepo, modelMgr, g2rClient, bus, notifRepo, notifSenders, backupMgr, exportService, logger)
 	go func() {
 		if err := srv.Start(); err != nil {
 			serverErr <- err
@@ -377,12 +409,17 @@ func main() {
 		logger.Error("http server shutdown error", "error", err)
 	}
 
+	if mqttPub != nil {
+		mqttPub.Stop()
+	}
+
 	camManager.Stop()      // bus.Publish is a safe no-op after bus.Close()
 	if startableDetector != nil {
 		startableDetector.Stop() // send SIGINT to sentinel-infer after the last detection frame
 	}
 	storageManager.Stop() // cancel worker contexts and wait for in-flight batch to finish
 	wd.Stop()
+	backupMgr.Stop() // stop scheduled backups before closing the DB
 
 	database.Close()
 

@@ -34,6 +34,8 @@ type CameraRecord struct {
 	ONVIFPort  int       `json:"onvif_port,omitempty"`
 	ONVIFUser  string    `json:"onvif_user,omitempty"`
 	ONVIFPass  string    `json:"-"` // never expose in API responses
+	NotificationCooldown int `json:"notification_cooldown_seconds"`
+	DetectionInterval    int `json:"detection_interval,omitempty"` // 0 = use global default
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
@@ -73,7 +75,9 @@ func (r *Repository) decryptPass(pass string) (string, error) {
 func (r *Repository) List(ctx context.Context) ([]CameraRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, name, enabled, main_stream, sub_stream, record, detect, zones,
-		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
+		       onvif_host, onvif_port, onvif_user, onvif_pass,
+		       notification_cooldown_seconds, detection_interval,
+		       created_at, updated_at
 		FROM cameras ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("listing cameras: %w", err)
@@ -95,7 +99,9 @@ func (r *Repository) List(ctx context.Context) ([]CameraRecord, error) {
 func (r *Repository) GetByName(ctx context.Context, name string) (*CameraRecord, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, name, enabled, main_stream, sub_stream, record, detect, zones,
-		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
+		       onvif_host, onvif_port, onvif_user, onvif_pass,
+		       notification_cooldown_seconds, detection_interval,
+		       created_at, updated_at
 		FROM cameras WHERE name = ?`, name)
 
 	cam, err := r.scanCameraRow(row)
@@ -112,7 +118,9 @@ func (r *Repository) GetByName(ctx context.Context, name string) (*CameraRecord,
 func (r *Repository) GetByID(ctx context.Context, id int) (*CameraRecord, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, name, enabled, main_stream, sub_stream, record, detect, zones,
-		       onvif_host, onvif_port, onvif_user, onvif_pass, created_at, updated_at
+		       onvif_host, onvif_port, onvif_user, onvif_pass,
+		       notification_cooldown_seconds, detection_interval,
+		       created_at, updated_at
 		FROM cameras WHERE id = ?`, id)
 
 	cam, err := r.scanCameraRow(row)
@@ -141,11 +149,13 @@ func (r *Repository) Create(ctx context.Context, cam *CameraRecord) (*CameraReco
 	}
 	err = r.db.QueryRowContext(ctx, `
 		INSERT INTO cameras (name, enabled, main_stream, sub_stream, record, detect, zones,
-		                     onvif_host, onvif_port, onvif_user, onvif_pass)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     onvif_host, onvif_port, onvif_user, onvif_pass,
+		                     notification_cooldown_seconds, detection_interval)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id, created_at, updated_at`,
 		cam.Name, cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect, string(zones),
 		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, encPass,
+		cam.NotificationCooldown, cam.DetectionInterval,
 	).Scan(&id, &createdAt, &updatedAt)
 
 	if err != nil {
@@ -181,11 +191,13 @@ func (r *Repository) Update(ctx context.Context, name string, cam *CameraRecord)
 		UPDATE cameras
 		SET enabled = ?, main_stream = ?, sub_stream = ?, record = ?, detect = ?, zones = ?,
 		    onvif_host = ?, onvif_port = ?, onvif_user = ?, onvif_pass = ?,
+		    notification_cooldown_seconds = ?, detection_interval = ?,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE name = ?
 		RETURNING id, created_at, updated_at`,
 		cam.Enabled, cam.MainStream, cam.SubStream, cam.Record, cam.Detect, string(updZones),
 		cam.ONVIFHost, cam.ONVIFPort, cam.ONVIFUser, encPass,
+		cam.NotificationCooldown, cam.DetectionInterval,
 		name,
 	).Scan(&id, &createdAt, &updatedAt)
 
@@ -203,6 +215,33 @@ func (r *Repository) Update(ctx context.Context, name string, cam *CameraRecord)
 	result.CreatedAt = createdAt
 	result.UpdatedAt = updatedAt
 	return &result, nil
+}
+
+// Rename changes a camera's name from oldName to newName.
+// Returns ErrNotFound if oldName doesn't exist, ErrDuplicate if newName is taken.
+func (r *Repository) Rename(ctx context.Context, oldName, newName string) (*CameraRecord, error) {
+	var id int
+	var createdStr, updatedStr string
+	err := r.db.QueryRowContext(ctx, `
+		UPDATE cameras
+		SET name = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE name = ?
+		RETURNING id, created_at, updated_at`,
+		newName, oldName,
+	).Scan(&id, &createdStr, &updatedStr)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			return nil, ErrDuplicate
+		}
+		return nil, fmt.Errorf("renaming camera %q to %q: %w", oldName, newName, err)
+	}
+
+	// Re-read the full record so the caller gets a complete CameraRecord.
+	return r.GetByName(ctx, newName)
 }
 
 // Delete removes a camera by name.
@@ -290,6 +329,7 @@ func (r *Repository) scanCamera(rows *sql.Rows) (CameraRecord, error) {
 		&cam.ID, &cam.Name, &enabled, &cam.MainStream, &cam.SubStream,
 		&record, &detect, &zonesRaw,
 		&cam.ONVIFHost, &cam.ONVIFPort, &cam.ONVIFUser, &cam.ONVIFPass,
+		&cam.NotificationCooldown, &cam.DetectionInterval,
 		&createdStr, &updatedStr,
 	)
 	if err != nil {
@@ -326,6 +366,7 @@ func (r *Repository) scanCameraRow(row *sql.Row) (CameraRecord, error) {
 		&cam.ID, &cam.Name, &enabled, &cam.MainStream, &cam.SubStream,
 		&record, &detect, &zonesRaw,
 		&cam.ONVIFHost, &cam.ONVIFPort, &cam.ONVIFUser, &cam.ONVIFPass,
+		&cam.NotificationCooldown, &cam.DetectionInterval,
 		&createdStr, &updatedStr,
 	)
 	if err != nil {

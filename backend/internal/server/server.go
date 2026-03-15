@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/auth"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/backup"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/camera"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/config"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/detection"
@@ -51,6 +52,8 @@ type Server struct {
 	eventBus             *eventbus.Bus         // Phase 3: used for WebSocket/SSE real-time event streaming
 	notifRepo            *notification.Repository  // Phase 8: token/pref management API (R9)
 	notifSenders         map[string]notification.Sender // provider → Sender; used by test notification endpoint
+	exportService        *recording.ExportService    // clip export; nil when not configured
+	backupMgr            *backup.Manager            // nil when backups are not configured
 	loginLimiter         *loginRateLimiter         // brute-force protection for /auth/login (CG6)
 	router               *gin.Engine
 	httpServer           *http.Server
@@ -63,7 +66,7 @@ type Server struct {
 // logLevel is the dynamic slog.LevelVar created in main; PUT /config updates it at runtime.
 // notifRepo may be nil when notifications.enabled=false.
 // configPath is the path to sentinel.yml on disk; passed to handleUpdateConfig for config persistence.
-func New(cfg *config.Config, configPath string, version string, db *sql.DB, authService *auth.Service, oidcProvider *auth.OIDCProvider, logLevel *slog.LevelVar, camManager *camera.Manager, camRepo *camera.Repository, recRepo *recording.Repository, detRepo *detection.Repository, faceRepo *detection.FaceRepository, faceRecognizer detection.FaceRecognizer, retentionRepo *storage.RetentionRepository, modelManager *models.Manager, g2r *go2rtc.Client, eventBus *eventbus.Bus, notifRepo *notification.Repository, notifSenders map[string]notification.Sender, logger *slog.Logger) *Server {
+func New(cfg *config.Config, configPath string, version string, db *sql.DB, authService *auth.Service, oidcProvider *auth.OIDCProvider, logLevel *slog.LevelVar, camManager *camera.Manager, camRepo *camera.Repository, recRepo *recording.Repository, detRepo *detection.Repository, faceRepo *detection.FaceRepository, faceRecognizer detection.FaceRecognizer, retentionRepo *storage.RetentionRepository, modelManager *models.Manager, g2r *go2rtc.Client, eventBus *eventbus.Bus, notifRepo *notification.Repository, notifSenders map[string]notification.Sender, backupMgr *backup.Manager, exportService *recording.ExportService, logger *slog.Logger) *Server {
 	if cfg.Server.LogLevel != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -112,6 +115,8 @@ func New(cfg *config.Config, configPath string, version string, db *sql.DB, auth
 		eventBus:             eventBus,
 		notifRepo:            notifRepo,
 		notifSenders:         notifSenders,
+		exportService:        exportService,
+		backupMgr:            backupMgr,
 		loginLimiter:         newLoginRateLimiter(5, 5*time.Minute),
 		router:               router,
 		logger:               logger.With("component", "http_server"),

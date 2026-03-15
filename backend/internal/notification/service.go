@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"database/sql"
+
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/eventbus"
 )
 
@@ -26,19 +28,23 @@ type Service struct {
 	wg        sync.WaitGroup // tracks all goroutines (run + recoverPending)
 	startOnce sync.Once      // prevents double-Start
 	started   atomic.Bool    // true after Start() has launched goroutines
+	cooldown  *CooldownTracker // per-camera:label notification cooldown (Priority 1)
+	db        *sql.DB          // direct DB handle for camera cooldown queries
 }
 
 // NewService creates a notification service.
 // senders maps provider names ("fcm", "apns", "webhook") to their Sender implementations.
 // Any provider with no Sender entry is silently skipped at dispatch time.
-func NewService(repo *Repository, senders map[string]Sender, bus *eventbus.Bus, logger *slog.Logger) *Service {
+func NewService(repo *Repository, senders map[string]Sender, bus *eventbus.Bus, logger *slog.Logger, db *sql.DB) *Service {
 	return &Service{
-		repo:    repo,
-		senders: senders,
-		bus:     bus,
-		logger:  logger.With("component", "notification"),
-		done:    make(chan struct{}),
-		stopCh:  make(chan struct{}),
+		repo:     repo,
+		senders:  senders,
+		bus:      bus,
+		logger:   logger.With("component", "notification"),
+		done:     make(chan struct{}),
+		stopCh:   make(chan struct{}),
+		cooldown: NewCooldownTracker(),
+		db:       db,
 	}
 }
 
@@ -130,9 +136,35 @@ func (s *Service) run() {
 // handleEvent looks up matching prefs and dispatches a notification for each
 // matching (user, token) pair. Each delivery is logged to notification_log for
 // crash recovery.
+// getCameraCooldown queries the cameras table for the notification_cooldown_seconds value.
+func (s *Service) getCameraCooldown(ctx context.Context, cameraID int) (int, error) {
+	if s.db == nil {
+		return 0, nil
+	}
+	var cooldown int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT notification_cooldown_seconds FROM cameras WHERE id = ?`, cameraID,
+	).Scan(&cooldown)
+	return cooldown, err
+}
+
 func (s *Service) handleEvent(event eventbus.Event) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	// Check cooldown before sending notifications (Priority 1).
+	if event.Type == "detection" && event.CameraID != 0 {
+		cooldownSec, err := s.getCameraCooldown(ctx, event.CameraID)
+		if err == nil && cooldownSec > 0 {
+			cooldownDuration := time.Duration(cooldownSec) * time.Second
+			if !s.cooldown.ShouldFire(event.CameraID, event.Label, cooldownDuration) {
+				s.logger.Debug("notification suppressed by cooldown",
+					"camera_id", event.CameraID,
+					"label", event.Label)
+				return
+			}
+		}
+	}
 
 	prefs, err := s.repo.MatchingPrefs(ctx, event.Type, event.CameraID)
 	if err != nil {

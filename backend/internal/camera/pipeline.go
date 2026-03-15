@@ -68,6 +68,7 @@ type Pipeline struct {
 	// so operators see ongoing recorder errors (e.g. ffmpeg not installed) — not just the first one.
 	recordingStartFailed bool
 	recordingFailCount   int
+	recordingNextRetry   time.Time // earliest time to retry recording start (exponential backoff)
 
 	// detStartFailed / detFailCount serve the same throttle purpose for detection.
 	detStartFailed bool
@@ -155,6 +156,11 @@ func NewPipeline(
 					"camera", cam.Name, "error", err)
 			}
 		}
+		// Use per-camera detection interval if set (> 0), otherwise use global config.
+		frameInterval := detCfg.FrameInterval
+		if cam.DetectionInterval > 0 {
+			frameInterval = cam.DetectionInterval
+		}
 		p.detPipeline = detection.NewDetectionPipeline(
 			detection.CameraInfo{ID: cam.ID, Name: cam.Name, Zones: zones},
 			streamName,
@@ -163,7 +169,7 @@ func NewPipeline(
 			detector,
 			snapshotDir,
 			detCfg.ConfidenceThresholdValue(),
-			time.Duration(detCfg.FrameInterval)*time.Second,
+			time.Duration(frameInterval)*time.Second,
 			bus,
 			logger,
 		)
@@ -337,9 +343,14 @@ func (p *Pipeline) checkStreamHealth() {
 				s.State = StateRecording
 				s.Recording = true
 			} else if p.recorder != nil && !recorderActive {
-				// Recorder exists but not active — need to start it
 				needsStartRecording = true
-				s.State = StateStreaming // will transition to Recording after start
+				if p.recordingFailCount > 2 {
+					s.State = StateError
+					s.LastError = fmt.Sprintf("recording crash loop (%d failures)", p.recordingFailCount)
+					s.Recording = false
+				} else {
+					s.State = StateStreaming
+				}
 			} else {
 				s.State = StateStreaming
 			}
@@ -439,6 +450,7 @@ func (p *Pipeline) checkStreamHealth() {
 		p.recorder.Stop()
 		p.recordingStartFailed = false // reset so the next start attempt is logged fresh
 		p.recordingFailCount = 0
+		p.recordingNextRetry = time.Time{}
 		p.logger.Info("recording stopped (stream lost)")
 	}
 	if needsStopDetection && p.detPipeline != nil {
@@ -463,28 +475,32 @@ func (p *Pipeline) checkStreamHealth() {
 	}
 
 	// Start recording if stream is active and recorder is not running.
-	// ensureDirectories() is called inside Recorder.Start() — no pre-call needed.
+	// Exponential backoff prevents crash-loop event flooding.
 	if needsStartRecording && p.recorder != nil {
-		if err := p.recorder.Start(); err != nil {
+		if time.Now().Before(p.recordingNextRetry) {
+			// Still in backoff window — skip this tick
+		} else if err := p.recorder.Start(); err != nil {
 			p.recordingFailCount++
-			// Log on first failure, then every 12 ticks (~1 min at 5s interval), so operators
-			// see persistent failures (e.g. ffmpeg not installed) without log flooding.
+			// Exponential backoff: 10s, 20s, 40s, 80s, ... capped at 5 minutes
+			backoff := time.Duration(10<<uint(min(p.recordingFailCount-1, 5))) * time.Second
+			if backoff > 5*time.Minute {
+				backoff = 5 * time.Minute
+			}
+			p.recordingNextRetry = time.Now().Add(backoff)
 			if !p.recordingStartFailed || p.recordingFailCount%12 == 0 {
 				p.logger.Error("failed to start recording",
-					"error", err, "consecutive_failures", p.recordingFailCount)
+					"error", err, "consecutive_failures", p.recordingFailCount,
+					"next_retry_in", backoff)
 				p.recordingStartFailed = true
 			}
 			p.setStatus(func(s *PipelineStatus) {
-				// Set state to Error so the API reflects an inconsistent condition
-				// rather than showing state=streaming with a non-empty last_error.
-				// The next health tick will retry recording start, resetting state
-				// to Recording if it succeeds.
 				s.State = StateError
 				s.LastError = fmt.Sprintf("recording failed: %v", err)
 			})
 		} else {
 			p.recordingStartFailed = false
 			p.recordingFailCount = 0
+			p.recordingNextRetry = time.Time{} // reset backoff
 			p.setStatus(func(s *PipelineStatus) {
 				s.State = StateRecording
 				s.Recording = true
@@ -514,6 +530,11 @@ func (p *Pipeline) checkStreamHealth() {
 					p.logger.Error("failed to parse camera zones", "camera", p.cam.Name, "error", err)
 				}
 			}
+			// Use per-camera detection interval if set (> 0), otherwise use global config.
+			frameInterval := p.detCfg.FrameInterval
+			if p.cam.DetectionInterval > 0 {
+				frameInterval = p.cam.DetectionInterval
+			}
 			p.detPipeline = detection.NewDetectionPipeline(
 				detection.CameraInfo{ID: p.cam.ID, Name: p.cam.Name, Zones: zones},
 				streamName,
@@ -522,7 +543,7 @@ func (p *Pipeline) checkStreamHealth() {
 				p.detector,
 				snapshotDir,
 				p.detCfg.ConfidenceThresholdValue(),
-				time.Duration(p.detCfg.FrameInterval)*time.Second,
+				time.Duration(frameInterval)*time.Second,
 				p.bus,
 				p.logger,
 			)

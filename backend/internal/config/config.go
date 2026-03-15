@@ -24,6 +24,7 @@ type Config struct {
 	Cameras       []CameraConfig     `yaml:"cameras"`
 	Watchdog      WatchdogConfig     `yaml:"watchdog"`
 	Relay         RelayConfig        `yaml:"relay"`     // Phase 12: remote access via TURN relay (CG11, R8)
+	MQTT          MQTTConfig         `yaml:"mqtt"`      // MQTT event bridge for Home Assistant integration
 }
 
 // ModelsConfig holds AI model management settings (R10).
@@ -94,6 +95,17 @@ type RelayConfig struct {
 	TURNServer string `yaml:"turn_server"` // e.g. "turn:coturn:3478"
 	TURNUser   string `yaml:"turn_user"`
 	TURNPass   string `yaml:"turn_pass"`
+}
+
+// MQTTConfig holds MQTT event bridge settings for Home Assistant integration.
+// When Enabled is true, detection and camera events are published to an MQTT broker.
+type MQTTConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Broker      string `yaml:"broker"`       // e.g. "tcp://localhost:1883"
+	TopicPrefix string `yaml:"topic_prefix"` // default "sentinel"
+	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
+	HADiscovery bool   `yaml:"ha_discovery"` // publish Home Assistant auto-discovery messages
 }
 
 // Go2RTCConfig holds connection settings for the go2rtc sidecar (CG3).
@@ -504,7 +516,7 @@ func setDefaults(cfg *Config) {
 		cfg.Detection.RemoteURL = "http://codeproject-ai:32168"
 	}
 	if cfg.Detection.FrameInterval == 0 {
-		cfg.Detection.FrameInterval = 5 // grab a frame every 5 seconds per camera
+		cfg.Detection.FrameInterval = 1 // grab a frame every 1 second per camera
 	}
 	if cfg.Detection.SnapshotPath == "" {
 		cfg.Detection.SnapshotPath = "/data/snapshots"
@@ -580,6 +592,11 @@ func setDefaults(cfg *Config) {
 	// Relay defaults (Phase 12, CG11)
 	if cfg.Relay.STUNServer == "" {
 		cfg.Relay.STUNServer = "stun:stun.l.google.com:19302"
+	}
+
+	// MQTT defaults
+	if cfg.MQTT.TopicPrefix == "" {
+		cfg.MQTT.TopicPrefix = "sentinel"
 	}
 
 	// Models defaults (R10)

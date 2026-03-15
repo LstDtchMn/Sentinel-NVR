@@ -154,7 +154,7 @@ func setupRoutesTestServer(t *testing.T) *routesTestEnv {
 		camManager, camRepo, recRepo, detRepo,
 		faceRepo, nil, retentionRepo, modelMgr,
 		g2rClient, bus, notifRepo,
-		nil, logger,
+		nil, nil, nil, logger,
 	)
 
 	// Start httptest server using the Gin router directly.
