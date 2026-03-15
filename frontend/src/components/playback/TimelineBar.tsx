@@ -240,6 +240,22 @@ export default function TimelineBar({
         {/* Tick marks — memoized in tickNodes above */}
         {tickNodes}
 
+        {/* "Now" indicator — dashed yellow line at current wall clock time (today only) */}
+        {date === new Date().toISOString().slice(0, 10) && (() => {
+          const now = new Date();
+          const nowSec = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+          if (nowSec >= viewStart && nowSec <= viewEnd) {
+            return (
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-yellow-400/60 pointer-events-none z-[5] border-l border-dashed border-yellow-400/40"
+                style={{ left: `${toPercent(nowSec)}%` }}
+                title={`Now: ${now.toLocaleTimeString()}`}
+              />
+            );
+          }
+          return null;
+        })()}
+
         {/* Playhead */}
         {currentTime !== null && currentTime >= viewStart && currentTime <= viewEnd && (
           <div
