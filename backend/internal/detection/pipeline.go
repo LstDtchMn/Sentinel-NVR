@@ -371,6 +371,10 @@ func (dp *DetectionPipeline) tryFaceRecognition(ctx context.Context, jpegBytes [
 		fresh, err := dp.faceRepo.ListWithEmbeddings(ctx)
 		if err != nil {
 			dp.logger.Warn("face matching query failed", "error", err)
+			// Reset cache expiry so the next frame retries the DB call
+			// instead of serving stale (possibly nil) cached data until the
+			// original TTL expires.
+			dp.faceCacheExpiry = time.Now()
 			return
 		}
 		dp.faceCache = fresh

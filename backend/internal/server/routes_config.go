@@ -216,10 +216,18 @@ func (s *Server) handleUpdateConfig(c *gin.Context) {
 		cfgCopy.Server.LogLevel = input.Server.LogLevel
 	}
 	if input.Storage != nil {
-		if input.Storage.HotRetentionDays > 0 {
+		if input.Storage.HotRetentionDays != 0 {
+			if input.Storage.HotRetentionDays < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "hot_retention_days must be positive"})
+				return
+			}
 			cfgCopy.Storage.HotRetentionDays = input.Storage.HotRetentionDays
 		}
-		if input.Storage.ColdRetentionDays > 0 {
+		if input.Storage.ColdRetentionDays != 0 {
+			if input.Storage.ColdRetentionDays < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "cold_retention_days must be positive"})
+				return
+			}
 			cfgCopy.Storage.ColdRetentionDays = input.Storage.ColdRetentionDays
 		}
 		if input.Storage.SegmentDuration > 0 {

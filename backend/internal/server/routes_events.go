@@ -75,6 +75,11 @@ func (s *Server) handleListEvents(c *gin.Context) {
 		f.Offset = off
 	}
 
+	if f.Offset+f.Limit > 10000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "offset + limit cannot exceed 10000"})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 

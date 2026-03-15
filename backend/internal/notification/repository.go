@@ -395,7 +395,8 @@ func (r *Repository) PendingLogs(ctx context.Context, minAge time.Duration) ([]P
 		        l.event_id, t.token, t.user_id
 		 FROM notification_log l
 		 JOIN notification_tokens t ON t.id = l.token_id
-		 WHERE l.status = 'pending' AND l.scheduled_at < ?`,
+		 WHERE l.status = 'pending' AND l.scheduled_at < ?
+		 LIMIT 100`,
 		cutoff,
 	)
 	if err != nil {
