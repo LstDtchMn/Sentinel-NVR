@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.2.1 — Beta Feedback Fixes + Sprint 1
+
+### Added
+- **User management page** — full CRUD: create users, change roles (admin/viewer), change passwords, delete (admin-only, self-deletion blocked)
+- **Camera rename** — PATCH /cameras/:name/rename API + editable name field in edit form with rename hint
+- **Video export** — GET /recordings/:id/download serves MP4 with Content-Disposition attachment header
+- **SQLite scheduled backups** — VACUUM INTO every 6h, 5-backup rotation, manual trigger via POST /admin/backup
+- **Collapsible sidebar** — toggle between 64px icon-only and 256px full mode, localStorage persistence, smooth transition
+- **Storage capacity display** — cross-platform disk usage (Statfs/GetDiskFreeSpaceEx), percentage bars with color coding
+- **Edit Zones button** — link to zone editor in camera edit form (previously hidden)
+- **Login forgot-password hint** — CLI reset command shown below Sign in button
+- **Notification channel labels** — "Channel type" with dynamic placeholders per provider
+- **Models installed badge** — green checkmark for downloaded models
+- **Playback camera memory** — last selected camera persisted in localStorage
+
+### Fixed
+- **Recording segment path reconstruction** — ffmpeg segment_list outputs relative filenames with strftime patterns; now reconstructs absolute paths using hotPath/camera/date/hour structure (fixes zero recordings in DB)
+- **WebSocket live view** — unwrap Gin ResponseWriter for nhooyr.io/websocket hijack; skip CORS headers for WS upgrade requests (fixes "Invalid frame header" / "response already written")
+- **Recording crash loop** — exponential backoff (10s→5min cap) prevents event flooding; pipeline shows StateError after 3+ failures instead of false "recording" status
+- **Recording event debounce** — suppress recording.started if last exit <5s ago; suppress recording.stopped if run <2s
+- **ffmpeg stderr logging** — log ALL output at Debug level (previously silently discarded non-error lines, hiding crash causes)
+- **Settings Save button** — always visible (disabled when form is clean), previously hidden until first change
+- **Camera snapshot refresh** — 30s→5s interval on camera cards
+- **Delete camera confirmation** — shows recording and event counts before deletion
+- **Sidebar version string** — smaller text with truncate + tooltip to prevent overflow
+
+### Known Issues
+- Playback localStorage pre-fill doesn't auto-trigger timeline data fetch — user must re-select camera or change date on first visit after rebuild
+- Historical recording events from pre-debounce crash loops remain in event log (not retroactively cleaned)
+
+---
+
 ## v0.1.0 — Initial Release
 
 ### Core Architecture
