@@ -525,6 +525,151 @@ func (m *Manager) RemoveCamera(ctx context.Context, name string) error {
 	return nil
 }
 
+// ValidateCameraName checks that a name matches the camera name regex.
+func ValidateCameraName(name string) error {
+	if name == "" {
+		return fmt.Errorf("camera name is required")
+	}
+	if !validCameraName.MatchString(name) {
+		return fmt.Errorf("invalid camera name: must be 1-64 alphanumeric/spaces/dashes/underscores, starting with alphanumeric")
+	}
+	return nil
+}
+
+// RenameCamera changes a camera's name, updating the DB, recording directories,
+// go2rtc streams, and the in-memory pipeline map.
+func (m *Manager) RenameCamera(ctx context.Context, oldName, newName string) (*CameraWithStatus, error) {
+	if err := ValidateCameraName(newName); err != nil {
+		return nil, err
+	}
+
+	if oldName == newName {
+		return m.GetCamera(ctx, oldName)
+	}
+
+	// Look up the old camera to know its stream config.
+	old, err := m.repo.GetByName(ctx, oldName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Stop the existing pipeline.
+	m.mu.Lock()
+	var oldPipeline *Pipeline
+	if pipeline, exists := m.cameras[oldName]; exists {
+		delete(m.cameras, oldName)
+		oldPipeline = pipeline
+	}
+	m.mu.Unlock()
+
+	if oldPipeline != nil {
+		oldPipeline.Stop()
+	}
+
+	// Wait for old pipeline goroutine to fully exit.
+	if oldPipeline != nil {
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		select {
+		case <-oldPipeline.startDone:
+			waitCancel()
+		case <-waitCtx.Done():
+			waitCancel()
+			m.logger.Error("timed out waiting for old pipeline to exit during rename", "name", oldName)
+		}
+	}
+
+	// Rename in DB.
+	renamed, err := m.repo.Rename(ctx, oldName, newName)
+	if err != nil {
+		// DB rename failed — try to restart the old pipeline so the camera isn't left stopped.
+		if old.Enabled {
+			m.restartPipelineForRecord(old)
+		}
+		return nil, err
+	}
+
+	// Rename recording directory on disk.
+	oldSanitized := SanitizeName(oldName)
+	newSanitized := SanitizeName(newName)
+	if oldSanitized != newSanitized {
+		resolvedHotPath := m.storageCfg.HotPath
+		if resolved, err := filepath.EvalSymlinks(m.storageCfg.HotPath); err == nil {
+			resolvedHotPath = resolved
+		}
+		oldDir := filepath.Join(resolvedHotPath, oldSanitized)
+		newDir := filepath.Join(resolvedHotPath, newSanitized)
+		if pathutil.IsUnderPath(filepath.Clean(oldDir), resolvedHotPath) &&
+			pathutil.IsUnderPath(filepath.Clean(newDir), resolvedHotPath) {
+			if err := os.Rename(oldDir, newDir); err != nil && !os.IsNotExist(err) {
+				m.logger.Warn("failed to rename recording directory", "old", oldDir, "new", newDir, "error", err)
+				// Non-fatal: recordings are referenced by camera_id FK in DB, so they
+				// still work. New recordings will use the new directory name.
+			}
+		}
+	}
+
+	// Update go2rtc: remove old streams, add new ones.
+	lifecycleCtx, lifecycleCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer lifecycleCancel()
+
+	m.removeFromGo2RTC(lifecycleCtx, oldName, old.SubStream != "")
+
+	if renamed.Enabled {
+		if err := m.syncToGo2RTC(lifecycleCtx, renamed); err != nil {
+			m.logger.Error("failed to sync renamed camera to go2rtc",
+				"name", newName,
+				"main_stream", RedactStreamURL(renamed.MainStream),
+				"error", err,
+			)
+		}
+
+		m.restartPipelineForRecord(renamed)
+	}
+
+	result := &CameraWithStatus{CameraRecord: *renamed}
+	m.mu.RLock()
+	if pipeline, exists := m.cameras[newName]; exists {
+		result.PipelineStatus = pipeline.Status()
+	} else {
+		result.PipelineStatus = PipelineStatus{State: StateIdle}
+	}
+	m.mu.RUnlock()
+
+	m.bus.Publish(eventbus.Event{
+		Type:  "camera.renamed",
+		Label: newName,
+		Data:  map[string]interface{}{"old_name": oldName, "new_name": newName},
+	})
+
+	m.logger.Info("camera renamed", "old_name", oldName, "new_name", newName)
+	return result, nil
+}
+
+// restartPipelineForRecord starts a new pipeline for the given camera record.
+// Used by RenameCamera to restart the pipeline after a rename or to restore
+// the old pipeline if the DB rename fails.
+func (m *Manager) restartPipelineForRecord(cam *CameraRecord) {
+	pipeline := NewPipeline(cam, m.g2r, m.rtspBase, m.storageCfg.HotPath, m.storageCfg.SegmentDuration, m.recRepo, m.detector, m.detCfg, m.bus, m.logger, m.pipeDeps)
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
+	m.cameras[cam.Name] = pipeline
+	m.wg.Add(1)
+	m.mu.Unlock()
+
+	go func() {
+		defer m.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				pipeline.logger.Error("pipeline goroutine panic (recovered)", "panic", r)
+			}
+		}()
+		pipeline.Start()
+	}()
+}
+
 // RestartCamera stops and restarts a camera's pipeline without modifying the DB
 // or re-syncing go2rtc. Used by the watchdog (R4) to recover pipelines that are
 // stuck in StateError when their internal retry loop hasn't resolved the fault.

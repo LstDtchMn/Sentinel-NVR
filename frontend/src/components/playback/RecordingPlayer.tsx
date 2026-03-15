@@ -273,7 +273,7 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
             />
           </div>
           <a
-            href={api.recordingPlayURL(segment.id)}
+            href={api.downloadRecordingURL(segment.id)}
             download
             className="bg-surface-overlay border border-border hover:bg-surface-raised px-3 py-1.5 rounded-lg text-sm flex items-center gap-2 shrink-0 transition-colors"
             title="Download segment"

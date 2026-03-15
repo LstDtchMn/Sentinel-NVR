@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { X } from "lucide-react";
+import { X, MapPin } from "lucide-react";
+import { Link } from "react-router-dom";
 import { api, CameraInput, CameraDetail } from "../../api/client";
 
 /** Pre-filled camera values passed from discovery/probe to the Add Camera form. */
@@ -191,6 +192,7 @@ export function EditCameraForm({
   onSuccess: () => void;
   onCancel: () => void;
 }) {
+  const [name, setName] = useState(camera.name);
   const [mainStream, setMainStream] = useState(camera.main_stream);
   const [subStream, setSubStream] = useState(camera.sub_stream || "");
   const [enabled, setEnabled] = useState(camera.enabled);
@@ -200,12 +202,14 @@ export function EditCameraForm({
   const [formError, setFormError] = useState<string | null>(null);
   const saveCtrlRef = useRef<AbortController>(null);
 
+  const nameChanged = name.trim() !== camera.name;
+
   // Abort in-flight save on unmount (e.g. user clicks Cancel or switches cameras)
   useEffect(() => () => saveCtrlRef.current?.abort(), []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!mainStream.trim()) return;
+    if (!name.trim() || !mainStream.trim()) return;
 
     setSubmitting(true);
     setFormError(null);
@@ -214,16 +218,23 @@ export function EditCameraForm({
     const ctrl = new AbortController();
     saveCtrlRef.current = ctrl;
     try {
+      // If the name changed, call rename API first.
+      let currentName = camera.name;
+      if (nameChanged) {
+        await api.renameCamera(camera.name, name.trim(), ctrl.signal);
+        currentName = name.trim();
+      }
+
       // zones are intentionally omitted — server preserves existing zones on update
       const input: CameraInput = {
-        name: camera.name,
+        name: currentName,
         main_stream: mainStream.trim(),
         sub_stream: subStream.trim() || undefined,
         enabled,
         record,
         detect,
       };
-      await api.updateCamera(camera.name, input, ctrl.signal);
+      await api.updateCamera(currentName, input, ctrl.signal);
       onSuccess();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -250,11 +261,20 @@ export function EditCameraForm({
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm text-muted mb-1">
-              Name
-              <span className="ml-2 text-xs text-faint">(read-only — rename via delete + recreate)</span>
-            </label>
-            <p className="text-sm text-white/60 font-mono py-2">{camera.name}</p>
+            <label htmlFor="edit-cam-name" className="block text-sm text-muted mb-1">Name *</label>
+            <input
+              id="edit-cam-name"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              className="w-full bg-surface-base border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-faint focus:outline-none focus:border-sentinel-500"
+            />
+            {nameChanged && (
+              <p className="mt-1 text-xs text-amber-400">
+                Camera will be renamed from &ldquo;{camera.name}&rdquo; to &ldquo;{name.trim()}&rdquo;
+              </p>
+            )}
           </div>
           <div>
             <label htmlFor="edit-main-stream" className="block text-sm text-muted mb-1">Main Stream URL *</label>
@@ -293,6 +313,16 @@ export function EditCameraForm({
           <Toggle label="Detect" checked={detect} onChange={setDetect} />
         </div>
 
+        <div>
+          <Link
+            to={`/cameras/${encodeURIComponent(camera.name)}/zones`}
+            className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 transition-colors"
+          >
+            <MapPin className="w-4 h-4" />
+            Edit Zones{camera.zones?.length > 0 ? ` (${camera.zones.length})` : ""}
+          </Link>
+        </div>
+
         <div className="flex justify-end gap-3 pt-2">
           <button
             type="button"
@@ -303,7 +333,7 @@ export function EditCameraForm({
           </button>
           <button
             type="submit"
-            disabled={submitting || !mainStream.trim()}
+            disabled={submitting || !name.trim() || !mainStream.trim()}
             className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
           >
             {submitting ? "Saving..." : "Save Changes"}

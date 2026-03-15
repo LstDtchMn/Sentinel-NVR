@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/camera"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/internal/recording"
+	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/diskutil"
 	"github.com/LstDtchMn/Sentinel-NVR/backend/pkg/pathutil"
 )
 
@@ -358,27 +360,102 @@ func (s *Server) handleStorageStats(c *gin.Context) {
 	}
 
 	type tierResp struct {
-		Path         string `json:"path"`
-		UsedBytes    int64  `json:"used_bytes"`
-		SegmentCount int    `json:"segment_count"`
+		Path           string `json:"path"`
+		UsedBytes      int64  `json:"used_bytes"`
+		SegmentCount   int    `json:"segment_count"`
+		TotalBytes     uint64 `json:"total_bytes"`
+		AvailableBytes uint64 `json:"available_bytes"`
 	}
 
 	cfg := s.snapConfig()
-	resp := gin.H{
-		"hot": tierResp{
-			Path:         cfg.Storage.HotPath,
-			UsedBytes:    hot.UsedBytes,
-			SegmentCount: hot.SegmentCount,
-		},
+
+	hotTier := tierResp{
+		Path:         cfg.Storage.HotPath,
+		UsedBytes:    hot.UsedBytes,
+		SegmentCount: hot.SegmentCount,
 	}
+	// Disk capacity is best-effort — failure leaves total/available as 0.
+	if du, err := diskutil.GetDiskUsage(s.resolvedHotPath); err == nil {
+		hotTier.TotalBytes = du.TotalBytes
+		hotTier.AvailableBytes = du.AvailableBytes
+	}
+
+	resp := gin.H{"hot": hotTier}
 	if cfg.Storage.ColdPath != "" {
-		resp["cold"] = tierResp{
+		coldTier := tierResp{
 			Path:         cfg.Storage.ColdPath,
 			UsedBytes:    cold.UsedBytes,
 			SegmentCount: cold.SegmentCount,
 		}
+		if du, err := diskutil.GetDiskUsage(s.resolvedColdPath); err == nil {
+			coldTier.TotalBytes = du.TotalBytes
+			coldTier.AvailableBytes = du.AvailableBytes
+		}
+		resp["cold"] = coldTier
 	} else {
 		resp["cold"] = nil
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// handleDownloadRecording serves a recording segment as an attachment download.
+// Sets Content-Disposition: attachment with a descriptive filename derived from
+// the camera name and segment start time (e.g. front_door_2026-03-15_14-30-00.mp4).
+// Like handlePlayRecording, the write deadline is cleared for large file transfers.
+func (s *Server) handleDownloadRecording(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid recording ID"})
+		return
+	}
+
+	// DB lookup with a bounded timeout; file transfer runs without a deadline.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	rec, err := s.recRepo.Get(ctx, id)
+	if errors.Is(err, recording.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "recording not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to get recording for download", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// Resolve symlinks to get the real path — prevents symlink-based path escape (CG4 security).
+	cleanPath := filepath.Clean(rec.Path)
+	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.logger.Warn("recording file missing from disk", "id", id, "path", rec.Path)
+			c.JSON(http.StatusNotFound, gin.H{"error": "recording file not found on disk"})
+		} else {
+			s.logger.Error("failed to resolve recording path", "id", id, "path", rec.Path, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		}
+		return
+	}
+	underHot := pathutil.IsUnderPath(resolvedPath, s.resolvedHotPath)
+	underCold := s.resolvedColdPath != "" && pathutil.IsUnderPath(resolvedPath, s.resolvedColdPath)
+	if !underHot && !underCold {
+		s.logger.Warn("recording path outside storage directories", "id", id, "path", rec.Path, "resolved", resolvedPath)
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	// Build a descriptive download filename: {sanitized_camera}_{date}_{time}.mp4
+	sanitizedName := camera.SanitizeName(rec.CameraName)
+	ts := rec.StartTime.In(time.Local)
+	filename := fmt.Sprintf("%s_%s.mp4", sanitizedName, ts.Format("2006-01-02_15-04-05"))
+
+	// Clear the write deadline so large transfers aren't truncated at the server timeout.
+	rc := http.NewResponseController(c.Writer)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		s.logger.Warn("failed to clear write deadline for download", "error", err)
+	}
+
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.File(resolvedPath)
 }

@@ -318,6 +318,17 @@ export interface ProbeResult {
   streams: StreamProfile[];
 }
 
+// --- User Management types ---
+
+/** A user account returned by the admin user management API. */
+export interface UserRecord {
+  id: number;
+  username: string;
+  role: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Pairing code returned by POST /pairing/qr (Phase 12, CG11). */
 export interface PairingCode {
   code: string;
@@ -329,6 +340,8 @@ export interface StorageTierStats {
   path: string;
   used_bytes: number;
   segment_count: number;
+  total_bytes: number;
+  available_bytes: number;
 }
 
 /** Aggregate storage stats for hot and (optionally) cold tiers (Phase 10, R13). */
@@ -488,6 +501,16 @@ class ApiClient {
     });
   }
 
+  /** Renames a camera (admin only). Returns the updated camera with new name. */
+  renameCamera(oldName: string, newName: string, signal?: AbortSignal): Promise<CameraDetail> {
+    return this.request<CameraDetail>(`/cameras/${encodeURIComponent(oldName)}/rename`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_name: newName }),
+      signal,
+    });
+  }
+
   async deleteCamera(name: string, signal?: AbortSignal): Promise<void> {
     await this.request(`/cameras/${encodeURIComponent(name)}`, {
       method: "DELETE",
@@ -573,6 +596,11 @@ class ApiClient {
   /** Returns the URL for streaming/downloading a recording segment. */
   recordingPlayURL(id: number): string {
     return `${API_BASE}/recordings/${id}/play`;
+  }
+
+  /** Returns the URL for downloading a recording segment as an attachment. */
+  downloadRecordingURL(id: number): string {
+    return `${API_BASE}/recordings/${id}/download`;
   }
 
   /** Returns detection events with optional filtering and pagination (Phase 5, R3). */
@@ -732,6 +760,53 @@ class ApiClient {
   listNotifLog(limit?: number, signal?: AbortSignal): Promise<NotifLogEntry[]> {
     const qs = limit ? `?limit=${limit}` : "";
     return this.request<NotifLogEntry[]>(`/notifications/log${qs}`, { signal });
+  }
+
+  // --- User Management (admin-only) ---
+
+  /** Returns all user accounts (admin only). */
+  listUsers(signal?: AbortSignal): Promise<UserRecord[]> {
+    return this.request<{ users: UserRecord[] }>("/admin/users", { signal }).then((r) => r.users);
+  }
+
+  /** Creates a new user account (admin only). */
+  createUser(
+    username: string,
+    password: string,
+    role: string,
+    signal?: AbortSignal,
+  ): Promise<UserRecord> {
+    return this.request<UserRecord>("/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, role }),
+      signal,
+    });
+  }
+
+  /** Deletes a user account by ID (admin only). */
+  async deleteUser(id: number, signal?: AbortSignal): Promise<void> {
+    await this.request(`/admin/users/${id}`, { method: "DELETE", signal });
+  }
+
+  /** Changes a user's role (admin only). */
+  updateUserRole(id: number, role: string, signal?: AbortSignal): Promise<UserRecord> {
+    return this.request<UserRecord>(`/admin/users/${id}/role`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role }),
+      signal,
+    });
+  }
+
+  /** Changes a user's password (admin only). */
+  async updateUserPassword(id: number, password: string, signal?: AbortSignal): Promise<void> {
+    await this.request(`/admin/users/${id}/password`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+      signal,
+    });
   }
 
   // --- Remote Access / Pairing (Phase 12, CG11) ---
