@@ -108,7 +108,8 @@ export default function Events() {
       source.close();
       setLiveConnected(false);
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps — filtersRef is a ref, not state
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // filtersRef is a ref, not state
 
   // Abort any in-flight load-more request when the component unmounts.
   useEffect(() => () => loadMoreCtrlRef.current?.abort(), []);

@@ -812,7 +812,7 @@ class ApiClient {
       clearTimeout(timeoutId);
       if (!resp.ok) {
         let detail = resp.statusText;
-        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch { /* non-JSON response */ }
         throw new Error(`API error ${resp.status}: ${detail}`);
       }
       return (await resp.json()) as FaceRecord;
@@ -874,7 +874,7 @@ class ApiClient {
       clearTimeout(timeoutId);
       if (!resp.ok) {
         let detail = resp.statusText;
-        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch { /* non-JSON response */ }
         throw new Error(`API error ${resp.status}: ${detail}`);
       }
       return (await resp.json()) as ImportResult;
@@ -959,7 +959,7 @@ class ApiClient {
       clearTimeout(timeoutId);
       if (!resp.ok) {
         let detail = resp.statusText;
-        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch { /* non-JSON response */ }
         throw new Error(`API error ${resp.status}: ${detail}`);
       }
       return (await resp.json()) as { filename: string; size_bytes: number; status: string };
@@ -997,7 +997,7 @@ class ApiClient {
       clearTimeout(timeoutId);
       if (!resp.ok) {
         let detail = resp.statusText;
-        try { const b = await resp.json(); if (b.error) detail = b.error; } catch {}
+        try { const b = await resp.json(); if (b.error) detail = b.error; } catch { /* non-JSON response */ }
         throw new Error(`API error ${resp.status}: ${detail}`);
       }
       return (await resp.json()) as ImportExecuteResult;
