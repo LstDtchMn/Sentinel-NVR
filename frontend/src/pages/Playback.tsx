@@ -5,7 +5,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, Scissors, X, Loader2 } from "lucide-react";
 import { api, type CameraDetail, type TimelineSegment, type HeatmapBucket } from "../api/client";
 import { todayDateString, currentMonthString, isoToSecondsSinceMidnight } from "../utils/time";
 import CameraSelector from "../components/playback/CameraSelector";
@@ -55,6 +55,14 @@ export default function Playback() {
   const [searchParams] = useSearchParams();
   // Pending seek from URL params — consumed once after segments load
   const pendingUrlSeekRef = useRef<number | null>(null);
+
+  // Export clip state (v0.3)
+  const [exportMode, setExportMode] = useState(false);
+  const [exportStart, setExportStart] = useState<number | null>(null); // seconds since midnight
+  const [exportEnd, setExportEnd] = useState<number | null>(null);     // seconds since midnight
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const exportCtrlRef = useRef<AbortController | null>(null);
 
   // Apply URL query params on mount (camera, date, time)
   useEffect(() => {
@@ -292,6 +300,135 @@ export default function Playback() {
     [currentTime],
   );
 
+  // Export clip handlers (v0.3)
+  const handleEnterExportMode = useCallback(() => {
+    setExportMode(true);
+    setExportError(null);
+    // Default range: if playhead exists, center a 30s clip around it
+    if (currentTime !== null) {
+      setExportStart(Math.max(0, currentTime - 15));
+      setExportEnd(Math.min(86400, currentTime + 15));
+    } else if (segments.length > 0) {
+      const segStart = isoToSecondsSinceMidnight(segments[0].start_time);
+      setExportStart(segStart);
+      setExportEnd(Math.min(86400, segStart + 30));
+    }
+  }, [currentTime, segments]);
+
+  const handleCancelExport = useCallback(() => {
+    setExportMode(false);
+    setExportStart(null);
+    setExportEnd(null);
+    setExportError(null);
+    exportCtrlRef.current?.abort();
+  }, []);
+
+  const exportDuration = exportStart !== null && exportEnd !== null
+    ? Math.max(0, exportEnd - exportStart)
+    : 0;
+
+  const handleExportDownload = useCallback(async () => {
+    if (!selectedCamera || exportStart === null || exportEnd === null) return;
+    if (exportDuration > 300) {
+      setExportError("Maximum export duration is 5 minutes");
+      return;
+    }
+    if (exportDuration < 1) {
+      setExportError("Select at least 1 second");
+      return;
+    }
+
+    setExporting(true);
+    setExportError(null);
+    exportCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    exportCtrlRef.current = ctrl;
+
+    try {
+      // Build RFC3339 timestamps from selectedDate + seconds-since-midnight
+      const dateBase = selectedDate + "T";
+      const startH = Math.floor(exportStart / 3600);
+      const startM = Math.floor((exportStart % 3600) / 60);
+      const startS = Math.floor(exportStart % 60);
+      const endH = Math.floor(exportEnd / 3600);
+      const endM = Math.floor((exportEnd % 3600) / 60);
+      const endS = Math.floor(exportEnd % 60);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const startRFC = dateBase + `${pad(startH)}:${pad(startM)}:${pad(startS)}Z`;
+      const endRFC = dateBase + `${pad(endH)}:${pad(endM)}:${pad(endS)}Z`;
+
+      const result = await api.exportClip(
+        { camera_name: selectedCamera, start: startRFC, end: endRFC },
+        ctrl.signal,
+      );
+
+      // Trigger download via hidden anchor
+      const a = document.createElement("a");
+      a.href = api.exportDownloadURL(result.export_id);
+      a.download = `${selectedCamera}_${selectedDate}_clip.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      setExportMode(false);
+      setExportStart(null);
+      setExportEnd(null);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setExportError(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }, [selectedCamera, selectedDate, exportStart, exportEnd, exportDuration]);
+
+  // Cleanup export controller on unmount
+  useEffect(() => () => exportCtrlRef.current?.abort(), []);
+
+  // Keyboard shortcuts for playback controls.
+  // Skip processing when an input element is focused to avoid interfering with typing.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          playerRef.current?.togglePlayPause();
+          break;
+        case "ArrowLeft":
+          e.preventDefault();
+          playerRef.current?.seekRelative(-10);
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          playerRef.current?.seekRelative(10);
+          break;
+        case "[":
+          if (activeSegment) {
+            const idx = segments.findIndex((s) => s.id === activeSegment.id);
+            if (idx > 0) handleSegmentChange(segments[idx - 1]);
+          }
+          break;
+        case "]":
+          if (activeSegment) {
+            const idx = segments.findIndex((s) => s.id === activeSegment.id);
+            if (idx >= 0 && idx < segments.length - 1) handleSegmentChange(segments[idx + 1]);
+          }
+          break;
+        case "1":
+          setPlaybackRate(1);
+          break;
+        case "2":
+          setPlaybackRate(2);
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeSegment, segments, handleSegmentChange]);
+
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
@@ -333,6 +470,36 @@ export default function Playback() {
         >
           <ChevronRight className="w-4 h-4" />
         </button>
+
+        {/* Export Clip button (v0.3) */}
+        <div className="ml-auto">
+          {!exportMode ? (
+            <button
+              type="button"
+              onClick={handleEnterExportMode}
+              disabled={!selectedCamera || segments.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium
+                         bg-surface-base border border-border text-muted
+                         hover:text-white hover:border-sentinel-500/50 transition-colors
+                         disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Export a clip from this recording"
+            >
+              <Scissors className="w-4 h-4" />
+              Export Clip
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleCancelExport}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium
+                         bg-surface-base border border-red-800/50 text-red-400
+                         hover:text-red-300 hover:border-red-700 transition-colors"
+            >
+              <X className="w-4 h-4" />
+              Cancel Export
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Error banner */}
@@ -362,8 +529,92 @@ export default function Playback() {
           onSegmentChange={handleSegmentChange}
           onPlaybackRateChange={setPlaybackRate}
           className="flex-1 min-h-0"
-          emptyMessage={selectedCamera && !loading && segments.length === 0 ? "No recordings for this date" : undefined}
+          emptyMessage={
+            !selectedCamera
+              ? undefined
+              : loading
+                ? "Loading recordings..."
+                : segments.length === 0
+                  ? "No recordings for this date"
+                  : "Click on the timeline to start playback"
+          }
         />
+
+        {/* Export clip controls (v0.3) — range sliders + download button */}
+        {exportMode && (
+          <div className="flex items-center gap-4 px-2 py-2 bg-surface-raised border border-sentinel-500/30 rounded-lg flex-shrink-0">
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <label className="text-xs text-muted whitespace-nowrap">Start</label>
+              <input
+                type="range"
+                min={0}
+                max={86400}
+                step={1}
+                value={exportStart ?? 0}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setExportStart(v);
+                  if (exportEnd !== null && v >= exportEnd) setExportEnd(Math.min(86400, v + 1));
+                }}
+                className="flex-1 accent-sentinel-500"
+              />
+              <span className="text-xs text-white/80 font-mono w-14 text-right">
+                {exportStart !== null
+                  ? `${String(Math.floor(exportStart / 3600)).padStart(2, "0")}:${String(Math.floor((exportStart % 3600) / 60)).padStart(2, "0")}:${String(Math.floor(exportStart % 60)).padStart(2, "0")}`
+                  : "--:--:--"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <label className="text-xs text-muted whitespace-nowrap">End</label>
+              <input
+                type="range"
+                min={0}
+                max={86400}
+                step={1}
+                value={exportEnd ?? 0}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setExportEnd(v);
+                  if (exportStart !== null && v <= exportStart) setExportStart(Math.max(0, v - 1));
+                }}
+                className="flex-1 accent-sentinel-500"
+              />
+              <span className="text-xs text-white/80 font-mono w-14 text-right">
+                {exportEnd !== null
+                  ? `${String(Math.floor(exportEnd / 3600)).padStart(2, "0")}:${String(Math.floor((exportEnd % 3600) / 60)).padStart(2, "0")}:${String(Math.floor(exportEnd % 60)).padStart(2, "0")}`
+                  : "--:--:--"}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 flex-shrink-0">
+              <span className={`text-xs font-medium ${exportDuration > 300 ? "text-red-400" : "text-sentinel-400"}`}>
+                {exportDuration >= 60
+                  ? `${Math.floor(exportDuration / 60)}m ${exportDuration % 60}s`
+                  : `${exportDuration}s`}
+                {exportDuration > 300 && " (max 5 min)"}
+              </span>
+              <button
+                type="button"
+                onClick={handleExportDownload}
+                disabled={exporting || exportDuration < 1 || exportDuration > 300}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium
+                           bg-sentinel-500 hover:bg-sentinel-600 text-white transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {exporting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
+                {exporting ? "Exporting..." : "Download"}
+              </button>
+            </div>
+          </div>
+        )}
+        {exportError && (
+          <div className="px-3 py-1.5 bg-status-error/10 border border-status-error/30 rounded text-xs text-status-error">
+            {exportError}
+          </div>
+        )}
 
         {/* Timeline bar */}
         <TimelineBar
