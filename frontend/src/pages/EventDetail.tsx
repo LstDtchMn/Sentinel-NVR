@@ -178,12 +178,15 @@ export default function EventDetail() {
           <dt className="text-muted">Timestamp</dt>
           <dd>{formatEventTimeLong(event.start_time)}</dd>
 
-          {event.camera_id !== null && (
-            <>
-              <dt className="text-muted">Camera ID</dt>
-              <dd>{event.camera_id}</dd>
-            </>
-          )}
+          {event.camera_id !== null && (() => {
+            const cameraName = cameras.find((c) => c.id === event.camera_id)?.name;
+            return (
+              <>
+                <dt className="text-muted">Camera</dt>
+                <dd>{cameraName || `Camera #${event.camera_id}`}</dd>
+              </>
+            );
+          })()}
 
           <dt className="text-muted">Has clip</dt>
           <dd>

@@ -4,6 +4,7 @@
  * Phase 6 (CG8): SSE subscription prepends new events live without polling.
  */
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Activity } from "lucide-react";
 import { api, EventRecord, CameraDetail, EventListParams } from "../api/client";
 import EventCard from "../components/events/EventCard";
@@ -22,6 +23,8 @@ const EVENT_TYPES = [
 ];
 
 export default function Events() {
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -29,10 +32,28 @@ export default function Events() {
   const [error, setError] = useState<string | null>(null);
 
   const [cameras, setCameras] = useState<CameraDetail[]>([]);
-  const [filterCamera, setFilterCamera] = useState<number | "">("");
-  const [filterType, setFilterType] = useState("");
-  const [filterDate, setFilterDate] = useState("");
-  const [filterMinConfidence, setFilterMinConfidence] = useState<number | "">("");
+
+  // Initialize filter state from URL search params (preserves state on browser back)
+  const [filterCamera, setFilterCamera] = useState<number | "">(() => {
+    const v = searchParams.get("camera");
+    return v ? Number(v) : "";
+  });
+  const [filterType, setFilterType] = useState(() => searchParams.get("type") || "");
+  const [filterDate, setFilterDate] = useState(() => searchParams.get("date") || "");
+  const [filterMinConfidence, setFilterMinConfidence] = useState<number | "">(() => {
+    const v = searchParams.get("min_confidence");
+    return v ? Number(v) : "";
+  });
+
+  // Sync filter state to URL search params (replace: true avoids polluting history)
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (filterCamera !== "") params.set("camera", String(filterCamera));
+    if (filterType) params.set("type", filterType);
+    if (filterDate) params.set("date", filterDate);
+    if (filterMinConfidence !== "") params.set("min_confidence", String(filterMinConfidence));
+    setSearchParams(params, { replace: true });
+  }, [filterCamera, filterType, filterDate, filterMinConfidence, setSearchParams]);
 
   // SSE connection state for the live indicator (Phase 6, CG8)
   const [liveConnected, setLiveConnected] = useState(false);

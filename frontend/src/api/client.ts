@@ -718,6 +718,16 @@ class ApiClient {
     await this.request(`/notifications/prefs/${id}`, { method: "DELETE", signal });
   }
 
+  /** Sends a test notification through a registered token to verify delivery (Phase 8). */
+  async testNotification(tokenId: number, signal?: AbortSignal): Promise<void> {
+    await this.request("/notifications/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token_id: tokenId }),
+      signal,
+    });
+  }
+
   /** Returns recent notification delivery log entries for the current user. */
   listNotifLog(limit?: number, signal?: AbortSignal): Promise<NotifLogEntry[]> {
     const qs = limit ? `?limit=${limit}` : "";

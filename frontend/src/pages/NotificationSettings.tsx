@@ -4,7 +4,7 @@
  */
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api, NotifToken, NotifPref, NotifLogEntry } from "../api/client";
-import { Bell, Plus, Trash2, CheckCircle, XCircle, Clock } from "lucide-react";
+import { Bell, Plus, Trash2, CheckCircle, XCircle, Clock, Zap } from "lucide-react";
 import Toast from "../components/Toast";
 import { useToast } from "../hooks/useToast";
 
@@ -26,6 +26,9 @@ export default function NotificationSettings() {
   const [loading, setLoading] = useState(true);
   // Toast feedback
   const { toast, showToast, dismissToast } = useToast();
+
+  // Track which token is currently being tested (for loading/disabled state).
+  const [testingTokenId, setTestingTokenId] = useState<number | null>(null);
 
   // New token form state
   const [newProvider, setNewProvider] = useState<"fcm" | "apns" | "webhook">("webhook");
@@ -109,6 +112,19 @@ export default function NotificationSettings() {
       const msg = err instanceof Error ? err.message : "Failed to remove token";
       setError(msg);
       showToast(msg, "error");
+    }
+  }
+
+  async function handleTestToken(id: number) {
+    setTestingTokenId(id);
+    try {
+      await api.testNotification(id);
+      showToast("Test notification sent", "success");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to send test notification";
+      showToast(msg, "error");
+    } finally {
+      setTestingTokenId(null);
     }
   }
 
@@ -198,13 +214,24 @@ export default function NotificationSettings() {
                       </div>
                       <p className="text-xs text-faint mt-0.5 truncate font-mono">{tok.token}</p>
                     </div>
-                    <button
-                      onClick={() => handleDeleteToken(tok.id)}
-                      className="ml-3 p-1.5 text-muted hover:text-status-error rounded transition-colors flex-shrink-0"
-                      title="Remove token"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-1 ml-3 flex-shrink-0">
+                      <button
+                        onClick={() => handleTestToken(tok.id)}
+                        disabled={testingTokenId === tok.id}
+                        className="p-1.5 text-muted hover:text-sentinel-400 rounded transition-colors border border-border disabled:opacity-50"
+                        title="Send test notification"
+                        aria-label={`Test notification channel ${tok.label || tok.provider}`}
+                      >
+                        <Zap className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteToken(tok.id)}
+                        className="p-1.5 text-muted hover:text-status-error rounded transition-colors flex-shrink-0"
+                        title="Remove token"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

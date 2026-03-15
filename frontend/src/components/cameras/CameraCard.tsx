@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
+  Camera,
   Edit2,
-  ImageOff,
   MapPin,
   RefreshCw,
   Trash2,
@@ -58,8 +58,9 @@ export function CameraCard({
             onError={() => setSnapshotError(true)}
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <ImageOff className="w-10 h-10 text-faint" />
+          <div className="w-full h-full flex flex-col items-center justify-center gap-2">
+            <Camera className="w-10 h-10 text-faint" />
+            <span className="text-xs text-muted">Connecting...</span>
           </div>
         )}
       </div>

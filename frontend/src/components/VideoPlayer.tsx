@@ -9,7 +9,7 @@
  * 3. Server streams: binary fMP4 frames (ftyp+moov init, then moof+mdat segments)
  */
 import { useRef, useEffect, useCallback, useState } from "react";
-import { AlertCircle, Loader2, VideoOff } from "lucide-react";
+import { AlertCircle, Loader2, VideoOff, WifiOff } from "lucide-react";
 
 /** Codecs to probe for MSE support — covers H.264, H.265, AAC, Opus, FLAC. */
 const CODEC_CANDIDATES = [
@@ -23,7 +23,7 @@ const CODEC_CANDIDATES = [
   "opus",
 ];
 
-type PlayerState = "idle" | "connecting" | "playing" | "error" | "reconnecting";
+type PlayerState = "idle" | "connecting" | "playing" | "error" | "reconnecting" | "unavailable";
 
 interface VideoPlayerProps {
   cameraName: string;
@@ -51,6 +51,12 @@ export default function VideoPlayer({
   const objectURL = useRef<string | null>(null);
   const unmountedRef = useRef(false);
   const liveEdgeTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Timestamp (ms) when the component first entered "reconnecting" state.
+   *  Used to detect 30s of continuous reconnection failure and switch to "unavailable". */
+  const reconnectStartRef = useRef<number | null>(null);
+  const reconnectTimeoutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** How long to wait in reconnecting state before showing "Stream Unavailable". */
+  const RECONNECT_TIMEOUT_MS = 30_000;
 
   // Stabilise onError: store in a ref so connect() never has it as a dep.
   // This prevents reconnect loops when a parent renders a new arrow function
@@ -119,6 +125,10 @@ export default function VideoPlayer({
     if (liveEdgeTimer.current) {
       clearInterval(liveEdgeTimer.current);
       liveEdgeTimer.current = null;
+    }
+    if (reconnectTimeoutTimer.current) {
+      clearTimeout(reconnectTimeoutTimer.current);
+      reconnectTimeoutTimer.current = null;
     }
 
     if (wsRef.current) {
@@ -279,6 +289,13 @@ export default function VideoPlayer({
               updateEndHandlerRef.current = onUpdateEnd;
               sb.addEventListener("updateend", onUpdateEnd);
 
+              // Connection succeeded — reset reconnect timeout tracking.
+              reconnectStartRef.current = null;
+              if (reconnectTimeoutTimer.current) {
+                clearTimeout(reconnectTimeoutTimer.current);
+                reconnectTimeoutTimer.current = null;
+              }
+
               setState("playing");
 
               // Periodically sync to live edge to minimise latency.
@@ -346,6 +363,26 @@ export default function VideoPlayer({
       setState("reconnecting");
       setErrorMsg("Connection lost, reconnecting...");
 
+      // Track when reconnecting started; if already set, check elapsed time.
+      if (reconnectStartRef.current === null) {
+        reconnectStartRef.current = Date.now();
+      }
+
+      // Schedule a timeout to switch to "unavailable" after 30s of continuous reconnection.
+      if (!reconnectTimeoutTimer.current) {
+        const elapsed = Date.now() - reconnectStartRef.current;
+        const remaining = RECONNECT_TIMEOUT_MS - elapsed;
+        if (remaining <= 0) {
+          setState("unavailable");
+          return;
+        }
+        reconnectTimeoutTimer.current = setTimeout(() => {
+          reconnectTimeoutTimer.current = null;
+          if (unmountedRef.current) return;
+          setState("unavailable");
+        }, remaining);
+      }
+
       const delay = reconnectDelay.current;
       reconnectDelay.current = Math.min(delay * 1.5, 15000);
 
@@ -405,6 +442,28 @@ export default function VideoPlayer({
         <div className="absolute inset-0 flex flex-col items-center justify-center">
           <Loader2 className="w-8 h-8 text-status-warn animate-spin mb-2" />
           <span className="text-sm text-status-warn">Reconnecting...</span>
+        </div>
+      )}
+
+      {/* Unavailable state — 30s of continuous reconnection failures */}
+      {state === "unavailable" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <WifiOff className="w-8 h-8 text-status-error mb-2" />
+          <span className="text-sm text-status-error">Stream Unavailable</span>
+          <button
+            onClick={() => {
+              reconnectDelay.current = 3000;
+              reconnectStartRef.current = null;
+              if (reconnectTimeoutTimer.current) {
+                clearTimeout(reconnectTimeoutTimer.current);
+                reconnectTimeoutTimer.current = null;
+              }
+              connect();
+            }}
+            className="mt-3 text-xs text-sentinel-400 hover:text-sentinel-300 font-medium"
+          >
+            Click to retry
+          </button>
         </div>
       )}
 

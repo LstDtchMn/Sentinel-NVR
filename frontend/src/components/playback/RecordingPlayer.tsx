@@ -91,6 +91,8 @@ const RecordingPlayer = forwardRef<RecordingPlayerHandle, RecordingPlayerProps>(
       video.playbackRate = playbackRateRef.current;
       if (seekOffset !== null) {
         video.currentTime = Math.max(0, Math.min(seekOffset, video.duration || 0));
+        // Ensure playback starts after seeking (e.g. URL deep-link from EventDetail)
+        video.play().catch(() => {});
       }
     };
     video.addEventListener("canplay", onCanPlay, { once: true });
