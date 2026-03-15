@@ -5,7 +5,7 @@
  */
 import { useEffect, useState } from "react";
 import { NavLink, useNavigate, useLocation } from "react-router-dom";
-import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut, Users, Upload, Box, Menu, X } from "lucide-react";
+import { Video, Clock, Activity, LayoutDashboard, Camera, Settings, Bell, Shield, LogOut, Users, UserCog, Upload, Box, Menu, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -18,6 +18,7 @@ const navItems = [
   { to: "/faces", label: "Faces", icon: Users },
   { to: "/models", label: "Models", icon: Box },
   { to: "/import", label: "Import", icon: Upload, adminOnly: true },
+  { to: "/users", label: "Users", icon: UserCog, adminOnly: true },
   { to: "/notifications", label: "Notifications", icon: Bell },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
@@ -25,6 +26,7 @@ const navItems = [
 export default function Sidebar() {
   const [version, setVersion] = useState<string>("");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true');
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -48,12 +50,27 @@ export default function Sidebar() {
     navigate("/login", { replace: true });
   }
 
-  const sidebarContent = (
+  const toggleCollapse = () => {
+    setCollapsed(prev => {
+      localStorage.setItem('sidebar-collapsed', String(!prev));
+      return !prev;
+    });
+  };
+
+  const sidebarContent = (isCollapsed: boolean) => (
     <>
       {/* Logo */}
-      <div className="h-16 flex items-center px-6 border-b border-border">
-        <Shield className="w-6 h-6 text-sentinel-500 mr-3" />
-        <span className="text-lg font-semibold tracking-tight">Sentinel NVR</span>
+      <div className={`h-16 flex items-center border-b border-border ${isCollapsed ? 'justify-center px-2' : 'px-6'}`}>
+        <Shield className={`w-6 h-6 text-sentinel-500 shrink-0 ${isCollapsed ? '' : 'mr-3'}`} />
+        {!isCollapsed && <span className="text-lg font-semibold tracking-tight">Sentinel NVR</span>}
+        {/* Collapse toggle — desktop only */}
+        <button
+          onClick={toggleCollapse}
+          className={`p-1.5 rounded-md text-muted hover:text-white hidden md:block ${isCollapsed ? '' : 'ml-auto'}`}
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+        </button>
         {/* Close button — mobile only */}
         <button
           onClick={() => setMobileOpen(false)}
@@ -70,16 +87,19 @@ export default function Sidebar() {
           <NavLink
             key={item.to}
             to={item.to}
+            title={isCollapsed ? item.label : undefined}
             className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+              `flex items-center py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                isCollapsed ? 'justify-center px-2' : 'gap-3 px-3'
+              } ${
                 isActive
                   ? "bg-sentinel-500/10 text-sentinel-500"
                   : "text-muted hover:text-white hover:bg-surface-overlay"
               }`
             }
           >
-            <item.icon className="w-5 h-5" />
-            {item.label}
+            <item.icon className="w-5 h-5 shrink-0" />
+            {!isCollapsed && item.label}
           </NavLink>
         ))}
       </nav>
@@ -87,13 +107,15 @@ export default function Sidebar() {
       {/* Footer — username + logout + version */}
       <div className="border-t border-border">
         {user && (
-          <div className="px-4 py-3 flex items-center justify-between">
-            <span className="text-xs text-muted truncate max-w-[120px]" title={user.username}>
-              {user.username}
-              {user.role === "admin" && user.role !== user.username && (
-                <span className="ml-1.5 text-[10px] text-sentinel-500 font-medium">admin</span>
-              )}
-            </span>
+          <div className={`py-3 flex items-center ${isCollapsed ? 'justify-center px-2' : 'justify-between px-4'}`}>
+            {!isCollapsed && (
+              <span className="text-xs text-muted truncate max-w-[120px]" title={user.username}>
+                {user.username}
+                {user.role === "admin" && user.role !== user.username && (
+                  <span className="ml-1.5 text-[10px] text-sentinel-500 font-medium">admin</span>
+                )}
+              </span>
+            )}
             <button
               onClick={handleLogout}
               title="Sign out"
@@ -105,9 +127,11 @@ export default function Sidebar() {
             </button>
           </div>
         )}
-        <div className="px-6 pb-4 text-xs text-faint">
-          Sentinel NVR {version ? `v${version}` : ""}
-        </div>
+        {!isCollapsed && (
+          <div className="px-4 pb-4 text-[11px] text-faint truncate" title={`Sentinel NVR ${version ? `v${version}` : ""}`}>
+            Sentinel NVR {version ? `v${version}` : ""}
+          </div>
+        )}
       </div>
     </>
   );
@@ -125,11 +149,11 @@ export default function Sidebar() {
       </button>
 
       {/* Desktop sidebar — hidden on mobile */}
-      <aside className="hidden md:flex w-64 bg-surface-raised border-r border-border flex-col shrink-0">
-        {sidebarContent}
+      <aside className={`hidden md:flex ${collapsed ? 'w-16' : 'w-64'} transition-all duration-200 bg-surface-raised border-r border-border flex-col shrink-0`}>
+        {sidebarContent(collapsed)}
       </aside>
 
-      {/* Mobile sidebar — overlay */}
+      {/* Mobile sidebar — overlay (never collapsed) */}
       {mobileOpen && (
         <>
           {/* Backdrop */}
@@ -139,7 +163,7 @@ export default function Sidebar() {
           />
           {/* Slide-in panel */}
           <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-surface-raised border-r border-border flex flex-col md:hidden">
-            {sidebarContent}
+            {sidebarContent(false)}
           </aside>
         </>
       )}

@@ -34,7 +34,7 @@ export function CameraCard({
   const state = ps?.state || "idle";
   const showRestart = state === "error" || state === "recording" || state === "streaming";
 
-  // Snapshot refresh: tick increments every 30s to cache-bust the thumbnail URL
+  // Snapshot refresh: tick increments every 5s to cache-bust the thumbnail URL
   const [tick, setTick] = useState(0);
   const [snapshotError, setSnapshotError] = useState(false);
 
@@ -42,7 +42,7 @@ export function CameraCard({
     const id = setInterval(() => {
       setTick((t) => t + 1);
       setSnapshotError(false); // retry on next tick
-    }, 30_000);
+    }, 5_000);
     return () => clearInterval(id);
   }, []);
 

@@ -373,35 +373,76 @@ export default function Settings() {
         {storageStats && (
           <section className="bg-surface-raised border border-border rounded-lg p-5">
             <h2 className="text-sm font-medium text-muted mb-4">Storage Usage</h2>
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted">
-                  Hot storage
-                  <span className="ml-2 text-xs text-faint font-mono">
-                    {config?.storage.hot_path}
-                  </span>
-                </span>
-                <span className="text-white/80 font-mono">
-                  {formatBytes(storageStats.hot.used_bytes)}
-                  <span className="text-faint ml-1">
-                    ({storageStats.hot.segment_count.toLocaleString()} segments)
-                  </span>
-                </span>
-              </div>
-              {storageStats.cold && (
-                <div className="flex justify-between">
+            <div className="space-y-4 text-sm">
+              {/* Hot storage */}
+              <div>
+                <div className="flex justify-between mb-1">
                   <span className="text-muted">
-                    Cold storage
+                    Hot storage
                     <span className="ml-2 text-xs text-faint font-mono">
-                      {storageStats.cold.path}
+                      {config?.storage.hot_path}
                     </span>
                   </span>
                   <span className="text-white/80 font-mono">
-                    {formatBytes(storageStats.cold.used_bytes)}
+                    {formatBytes(storageStats.hot.used_bytes)}
+                    {storageStats.hot.total_bytes > 0 && (
+                      <span className="text-faint ml-1">
+                        / {formatBytes(storageStats.hot.total_bytes)}
+                      </span>
+                    )}
                     <span className="text-faint ml-1">
-                      ({storageStats.cold.segment_count.toLocaleString()} segments)
+                      ({storageStats.hot.segment_count.toLocaleString()} segments)
                     </span>
                   </span>
+                </div>
+                {storageStats.hot.total_bytes > 0 && (() => {
+                  const usedOnDisk = storageStats.hot.total_bytes - storageStats.hot.available_bytes;
+                  const pct = Math.min(100, Math.round((usedOnDisk / storageStats.hot.total_bytes) * 100));
+                  return (
+                    <div className="w-full bg-surface-base rounded-full h-2 overflow-hidden" title={`${pct}% used (${formatBytes(usedOnDisk)} of ${formatBytes(storageStats.hot.total_bytes)})`}>
+                      <div
+                        className={`h-full rounded-full transition-all ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-yellow-500' : 'bg-sentinel-500'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Cold storage */}
+              {storageStats.cold && (
+                <div>
+                  <div className="flex justify-between mb-1">
+                    <span className="text-muted">
+                      Cold storage
+                      <span className="ml-2 text-xs text-faint font-mono">
+                        {storageStats.cold.path}
+                      </span>
+                    </span>
+                    <span className="text-white/80 font-mono">
+                      {formatBytes(storageStats.cold.used_bytes)}
+                      {storageStats.cold.total_bytes > 0 && (
+                        <span className="text-faint ml-1">
+                          / {formatBytes(storageStats.cold.total_bytes)}
+                        </span>
+                      )}
+                      <span className="text-faint ml-1">
+                        ({storageStats.cold.segment_count.toLocaleString()} segments)
+                      </span>
+                    </span>
+                  </div>
+                  {storageStats.cold.total_bytes > 0 && (() => {
+                    const usedOnDisk = storageStats.cold!.total_bytes - storageStats.cold!.available_bytes;
+                    const pct = Math.min(100, Math.round((usedOnDisk / storageStats.cold!.total_bytes) * 100));
+                    return (
+                      <div className="w-full bg-surface-base rounded-full h-2 overflow-hidden" title={`${pct}% used (${formatBytes(usedOnDisk)} of ${formatBytes(storageStats.cold!.total_bytes)})`}>
+                        <div
+                          className={`h-full rounded-full transition-all ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-yellow-500' : 'bg-sentinel-500'}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -586,19 +627,17 @@ export default function Settings() {
           )}
         </section>
 
-        {dirty && (
-          <div className="sticky bottom-0 bg-surface-base/95 backdrop-blur-sm border-t border-border py-3 px-8 -mx-8">
-            <div className="flex justify-end">
-              <button
-                type="submit"
-                disabled={submitting}
-                className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
-              >
-                {submitting ? "Saving..." : "Save Settings"}
-              </button>
-            </div>
+        <div className="sticky bottom-0 bg-surface-base/95 backdrop-blur-sm border-t border-border py-3 px-8 -mx-8">
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={!dirty || submitting}
+              className="bg-sentinel-500 hover:bg-sentinel-600 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
+            >
+              {submitting ? "Saving..." : "Save Settings"}
+            </button>
           </div>
-        )}
+        </div>
       </form>
       {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
     </div>

@@ -249,7 +249,7 @@ export default function NotificationSettings() {
                 <select
                   value={newProvider}
                   onChange={(e) => setNewProvider(e.target.value as typeof newProvider)}
-                  aria-label="Token provider"
+                  aria-label="Channel type"
                   className="col-span-1 bg-surface-base border border-border rounded px-3 py-2 text-sm"
                 >
                   {PROVIDERS.map((p) => (
@@ -258,7 +258,7 @@ export default function NotificationSettings() {
                 </select>
                 <input
                   type="text"
-                  placeholder={newProvider === "webhook" ? "https://your-server/hook" : "FCM/APNs device token"}
+                  placeholder={newProvider === "webhook" ? "https://your-webhook-url/alert" : newProvider === "fcm" ? "FCM device token" : "APNs device token"}
                   value={newToken}
                   onChange={(e) => setNewToken(e.target.value)}
                   required

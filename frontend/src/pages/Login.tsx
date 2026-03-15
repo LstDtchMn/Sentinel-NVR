@@ -104,6 +104,10 @@ export default function Login() {
           >
             {submitting ? "Signing in…" : "Sign in"}
           </button>
+          <p className="text-xs text-faint text-center mt-3">
+            Forgot password? Reset via CLI:{" "}
+            <code className="text-muted font-mono">sentinel -reset-password &lt;user&gt;</code>
+          </p>
         </form>
       </div>
     </div>

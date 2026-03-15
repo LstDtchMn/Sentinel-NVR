@@ -16,7 +16,9 @@ import RecordingPlayer, { type RecordingPlayerHandle } from "../components/playb
 export default function Playback() {
   // Camera state
   const [cameras, setCameras] = useState<CameraDetail[]>([]);
-  const [selectedCamera, setSelectedCamera] = useState<string | null>(null);
+  const [selectedCamera, setSelectedCamera] = useState<string | null>(
+    () => localStorage.getItem('playback-last-camera') || null,
+  );
 
   // Date state
   const [selectedDate, setSelectedDate] = useState(todayDateString());
@@ -168,9 +170,10 @@ export default function Playback() {
     return () => controller.abort();
   }, [selectedCameraId, selectedDate]);
 
-  // Camera selection handler
+  // Camera selection handler — persist to localStorage so Playback remembers the last camera
   const handleCameraSelect = useCallback((name: string) => {
     setSelectedCamera(name);
+    localStorage.setItem('playback-last-camera', name);
     setActiveSegment(null);
     setCurrentTime(null);
   }, []);

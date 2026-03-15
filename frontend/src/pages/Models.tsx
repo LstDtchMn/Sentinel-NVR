@@ -184,6 +184,14 @@ export default function Models() {
                   </button>
                 )}
 
+                {/* Installed badge for curated models */}
+                {m.curated && m.installed && (
+                  <span className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/15 text-green-400 rounded-lg text-xs font-medium">
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    Installed
+                  </span>
+                )}
+
                 {/* Delete button for installed models (admin only) */}
                 {m.installed && isAdmin && (
                   <button

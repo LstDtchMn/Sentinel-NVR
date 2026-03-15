@@ -69,7 +69,26 @@ export default function Cameras() {
   useEffect(() => () => manualCtrlRef.current?.abort(), []);
 
   const handleDelete = async (name: string) => {
-    if (!window.confirm(`Delete camera "${name}"? This will remove all associated recordings.`)) return;
+    // Fetch impact counts (recordings + events) so the user sees what will be deleted.
+    const cam = cameras?.find((c) => c.name === name);
+    let recTotal = 0;
+    let evtTotal = 0;
+    try {
+      const [recResp, evtResp] = await Promise.all([
+        api.getRecordings({ camera: name, limit: 1 }),
+        cam ? api.getEvents({ camera_id: cam.id, limit: 1 }) : Promise.resolve({ events: [], total: 0 }),
+      ]);
+      recTotal = recResp.total;
+      evtTotal = evtResp.total;
+    } catch {
+      // If counts fail, still allow deletion with a generic message
+    }
+
+    const impactLine = (recTotal > 0 || evtTotal > 0)
+      ? `\n\nThis will also delete ${recTotal} recording(s) and ${evtTotal} event(s).`
+      : "";
+    if (!window.confirm(`Delete camera "${name}"?${impactLine}\n\nThis cannot be undone.`)) return;
+
     // Register this controller in manualCtrlRef so the unmount cleanup aborts it.
     // ctrl.signal.aborted then serves as the mounted-check for post-await code.
     manualCtrlRef.current?.abort();
