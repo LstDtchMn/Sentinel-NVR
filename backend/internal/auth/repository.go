@@ -267,6 +267,112 @@ func (r *Repository) DeleteExpiredRefreshTokens(ctx context.Context) error {
 	return err
 }
 
+// ListUsers returns all users ordered by creation time.
+// Password hashes are included in the result but should never be exposed in API responses
+// (the User struct has json:"-" on PasswordHash).
+func (r *Repository) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, username, password_hash, role, created_at, updated_at
+		 FROM users ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		var createdStr, updatedStr string
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &createdStr, &updatedStr); err != nil {
+			return nil, fmt.Errorf("scanning user row: %w", err)
+		}
+		u.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		u.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing updated_at: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating user rows: %w", err)
+	}
+	if users == nil {
+		users = []User{}
+	}
+	return users, nil
+}
+
+// DeleteUser removes a user and all associated refresh tokens (cascade).
+// Returns ErrNotFound if the user does not exist.
+func (r *Repository) DeleteUser(ctx context.Context, id int) error {
+	// Delete refresh tokens first (no FK cascade in all schemas).
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE user_id = ?`, id); err != nil {
+		return fmt.Errorf("deleting refresh tokens for user %d: %w", id, err)
+	}
+	res, err := r.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateUserRole changes a user's role (e.g. "admin" → "viewer").
+// Returns the updated user or ErrNotFound.
+func (r *Repository) UpdateUserRole(ctx context.Context, id int, role string) (*User, error) {
+	var u User
+	var createdStr, updatedStr string
+	err := r.db.QueryRowContext(ctx,
+		`UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+		 RETURNING id, username, password_hash, role, created_at, updated_at`,
+		role, id,
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &createdStr, &updatedStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("updating role for user %d: %w", id, err)
+	}
+	u.CreatedAt, err = dbutil.ParseSQLiteTime(createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing created_at: %w", err)
+	}
+	u.UpdatedAt, err = dbutil.ParseSQLiteTime(updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing updated_at: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdateUserPassword changes a user's password hash.
+// Returns ErrNotFound if the user does not exist.
+func (r *Repository) UpdateUserPassword(ctx context.Context, id int, passwordHash string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password for user %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // GetSetting returns the value of a system_settings key.
 // Returns ErrNotFound if the key does not exist.
 func (r *Repository) GetSetting(ctx context.Context, key string) (string, error) {

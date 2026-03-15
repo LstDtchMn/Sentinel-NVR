@@ -22,6 +22,7 @@ import Faces from "./pages/Faces";
 import Models from "./pages/Models";
 import Import from "./pages/Import";
 import ZoneEditor from "./pages/ZoneEditor";
+import Users from "./pages/Users";
 import Login from "./pages/Login";
 import Setup from "./pages/Setup";
 
@@ -68,6 +69,7 @@ function AppShell() {
             <Route path="/faces" element={<Faces />} />
             <Route path="/models" element={<Models />} />
             <Route path="/import" element={<Import />} />
+            <Route path="/users" element={<Users />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/notifications" element={<NotificationSettings />} />
             {/* Catch-all: redirect unknown paths to live view */}

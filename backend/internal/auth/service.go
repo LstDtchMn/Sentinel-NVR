@@ -225,6 +225,40 @@ func (s *Service) IssueTokenPairForUserID(ctx context.Context, userID int) (*Tok
 	return s.issueTokenPair(ctx, user)
 }
 
+// ListUsers returns all user accounts. Delegates to Repository.ListUsers.
+func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
+	return s.repo.ListUsers(ctx)
+}
+
+// CreateUser creates a new user with the given username, plaintext password, and role.
+// The password is hashed with bcrypt before storage.
+func (s *Service) CreateUser(ctx context.Context, username, password, role string) (*User, error) {
+	hash, err := HashPassword(password)
+	if err != nil {
+		return nil, fmt.Errorf("hashing password: %w", err)
+	}
+	return s.repo.CreateUser(ctx, username, hash, role)
+}
+
+// DeleteUser removes a user by ID. Delegates to Repository.DeleteUser.
+func (s *Service) DeleteUser(ctx context.Context, id int) error {
+	return s.repo.DeleteUser(ctx, id)
+}
+
+// UpdateUserRole changes a user's role. Delegates to Repository.UpdateUserRole.
+func (s *Service) UpdateUserRole(ctx context.Context, id int, role string) (*User, error) {
+	return s.repo.UpdateUserRole(ctx, id, role)
+}
+
+// UpdateUserPassword changes a user's password. The plaintext password is hashed before storage.
+func (s *Service) UpdateUserPassword(ctx context.Context, id int, password string) error {
+	hash, err := HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("hashing password: %w", err)
+	}
+	return s.repo.UpdateUserPassword(ctx, id, hash)
+}
+
 // issueTokenPair creates a new access JWT and a random refresh token for user.
 func (s *Service) issueTokenPair(ctx context.Context, user *User) (*TokenPair, error) {
 	now := time.Now()
