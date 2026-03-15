@@ -119,6 +119,13 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		// Skip CORS headers for WebSocket upgrade requests — writing response headers
+		// before websocket.Accept commits the Gin ResponseWriter, preventing hijack.
+		if c.Request.Header.Get("Upgrade") == "websocket" {
+			c.Next()
+			return
+		}
+
 		origin := c.Request.Header.Get("Origin")
 		if origin != "" && allowed[origin] {
 			// Reflect the specific origin so browsers accept cookies.

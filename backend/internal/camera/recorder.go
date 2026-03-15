@@ -42,8 +42,10 @@ type Recorder struct {
 	stdin    io.WriteCloser
 	cancel   context.CancelFunc
 	active   bool
-	stopping bool           // true between Stop() releasing the lock and ffmpeg exiting
-	done     chan struct{}   // closed when ffmpeg process + all I/O goroutines finish
+	stopping      bool           // true between Stop() releasing the lock and ffmpeg exiting
+	done          chan struct{}   // closed when ffmpeg process + all I/O goroutines finish
+	lastStartTime time.Time      // when Start() was last called; used to suppress events on crash loop
+	lastExitTime  time.Time      // when ffmpeg last exited; used to suppress events on crash loop
 }
 
 // NewRecorder creates a recorder for a camera. Does not start ffmpeg.
@@ -132,17 +134,21 @@ func (r *Recorder) Start() error {
 	r.cancel = cancel
 	r.active = true
 	r.done = make(chan struct{})
+	r.lastStartTime = time.Now()
 
 	r.logger.Info("ffmpeg recording started",
 		"pid", cmd.Process.Pid,
 		"stream", RedactStreamURL(r.rtspBase+"/"+r.cam.Name),
 		"segment_duration", r.segmentDuration,
 	)
-	r.bus.Publish(eventbus.Event{
-		Type:     "recording.started",
-		CameraID: r.cam.ID,
-		Label:    r.cam.Name,
-	})
+	// Suppress "recording.started" event during crash loops (rapid restarts)
+	if r.lastExitTime.IsZero() || time.Since(r.lastExitTime) > 5*time.Second {
+		r.bus.Publish(eventbus.Event{
+			Type:     "recording.started",
+			CameraID: r.cam.ID,
+			Label:    r.cam.Name,
+		})
+	}
 
 	// Track I/O goroutines so done isn't closed while they're still running.
 	// This prevents use-after-free when callers proceed after Stop() returns.
@@ -171,21 +177,28 @@ func (r *Recorder) Start() error {
 		r.mu.Lock()
 		wasActive := r.active
 		r.active = false
+		r.lastExitTime = time.Now()
 		// Do NOT clear stopping here — I/O goroutines (readSegmentList, drainStderr)
 		// are still running. Clearing stopping before they finish would allow a
 		// concurrent Start() to launch new I/O goroutines while old ones are active.
+		runDuration := time.Since(r.lastStartTime)
 		r.mu.Unlock()
 
+		// Suppress events for sub-2-second runs (crash loop) to avoid flooding the events page
+		crashLoop := runDuration < 2*time.Second
+
 		if wasActive {
-			r.logger.Warn("ffmpeg exited unexpectedly", "error", err)
+			r.logger.Warn("ffmpeg exited unexpectedly", "error", err, "run_duration", runDuration)
 		} else {
 			r.logger.Info("ffmpeg stopped cleanly")
 		}
-		r.bus.Publish(eventbus.Event{
-			Type:     "recording.stopped",
-			CameraID: r.cam.ID,
-			Label:    r.cam.Name,
-		})
+		if !crashLoop {
+			r.bus.Publish(eventbus.Event{
+				Type:     "recording.stopped",
+				CameraID: r.cam.ID,
+				Label:    r.cam.Name,
+			})
+		}
 
 		ioWg.Wait() // wait for readSegmentList and drainStderr to exit
 
@@ -277,6 +290,35 @@ func (r *Recorder) processCompletedSegment(segPath string) {
 	// Do this first so os.Stat, isUnderPath, and the DB record all use the
 	// canonical OS-specific separator.
 	segPath = filepath.Clean(filepath.FromSlash(segPath))
+
+	// ffmpeg's segment_list with -segment_list_type flat outputs only the filename
+	// (e.g., "01.52.mp4") when using strftime output patterns, not the full path.
+	// Reconstruct the absolute path using the known directory structure:
+	//   {hotPath}/{sanitizedName}/{YYYY-MM-DD}/{HH}/{MM.SS.mp4}
+	// We use the file's modification time (via os.Stat on the reconstructed path)
+	// to determine the correct date/hour directory, falling back to time.Now().
+	if !filepath.IsAbs(segPath) {
+		sanitized := SanitizeName(r.cam.Name)
+		now := time.Now()
+		reconstructed := filepath.Join(r.hotPath, sanitized,
+			now.Format("2006-01-02"), fmt.Sprintf("%02d", now.Hour()), segPath)
+		if _, err := os.Stat(reconstructed); err == nil {
+			segPath = reconstructed
+		} else {
+			// The segment might have been written in the previous hour (clock boundary).
+			// Try one hour back.
+			prevHour := now.Add(-time.Hour)
+			alt := filepath.Join(r.hotPath, sanitized,
+				prevHour.Format("2006-01-02"), fmt.Sprintf("%02d", prevHour.Hour()), segPath)
+			if _, err := os.Stat(alt); err == nil {
+				segPath = alt
+			} else {
+				r.logger.Warn("could not reconstruct absolute path for segment",
+					"raw", segPath, "tried", reconstructed, "alt", alt)
+				return
+			}
+		}
+	}
 
 	// Containment check: reject paths that escape the hot storage boundary before
 	// inserting into the DB. The serve/delete endpoints also check at read time,
@@ -391,10 +433,11 @@ func (r *Recorder) drainStderr(stderr io.Reader) {
 	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Only log warnings and errors from ffmpeg (skip info/progress lines)
 		if strings.Contains(line, "error") || strings.Contains(line, "Error") ||
 			strings.Contains(line, "warning") || strings.Contains(line, "Warning") {
 			r.logger.Warn("ffmpeg", "output", line)
+		} else {
+			r.logger.Debug("ffmpeg", "output", line)
 		}
 	}
 	if err := scanner.Err(); err != nil {

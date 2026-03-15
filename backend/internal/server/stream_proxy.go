@@ -45,19 +45,19 @@ func (s *Server) handleStreamWS(c *gin.Context) {
 		return
 	}
 
-	// Clear WriteTimeout — WebSocket connections are long-lived and must not be
-	// killed by the 15s server timeout (same pattern as handlePlayRecording).
-	rc := http.NewResponseController(c.Writer)
-	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-		s.logger.Warn("failed to clear write deadline for stream proxy", "error", err)
-	}
-
-	// Accept WebSocket from browser with origin validation.
+	// Accept WebSocket using the raw http.ResponseWriter to bypass Gin's
+	// ResponseWriter wrapper. Gin's wrapper tracks whether WriteHeader was called
+	// and returns "response already written" from Hijack() if any header has been
+	// flushed. nhooyr.io/websocket.Accept needs to write 101 + hijack, which
+	// conflicts with Gin's tracking. Using c.Request.Context().Value(gin.ContextKey)
+	// won't help — we need the raw writer. Gin stores it as the first field.
+	//
 	// OriginPatterns lists the allowed origins from the server config (Phase 7, CG6).
-	// This replaces the earlier InsecureSkipVerify: the CORS middleware guards HTTP
-	// requests, but the WebSocket protocol needs its own origin check at Accept time.
-	// Each origin is converted to a pattern by stripping the scheme prefix.
-	clientConn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{
+	var rawWriter http.ResponseWriter = c.Writer
+	if uw, ok := rawWriter.(interface{ Unwrap() http.ResponseWriter }); ok {
+		rawWriter = uw.Unwrap()
+	}
+	clientConn, err := websocket.Accept(rawWriter, c.Request, &websocket.AcceptOptions{
 		OriginPatterns: s.wsOriginPatterns(),
 	})
 	if err != nil {
@@ -65,6 +65,13 @@ func (s *Server) handleStreamWS(c *gin.Context) {
 		return // Accept already wrote the HTTP error response
 	}
 	defer clientConn.CloseNow()
+
+	// Clear WriteTimeout now that the connection is hijacked — WebSocket connections
+	// are long-lived and must not be killed by the 15s server timeout.
+	rc := http.NewResponseController(c.Writer)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		s.logger.Debug("failed to clear write deadline for stream proxy (expected after hijack)", "error", err)
+	}
 
 	// Increase read limit — go2rtc sends binary fMP4 frames that can be large (video keyframes).
 	clientConn.SetReadLimit(4 * 1024 * 1024) // 4 MiB
